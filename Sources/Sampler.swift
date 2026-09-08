@@ -3,15 +3,23 @@ import Darwin
 import Foundation
 
 /// Live process + machine snapshot.  CPU percent matches Activity Monitor:
-/// 100% is one core fully busy.
+/// 100% is one core fully busy.  `proc_taskinfo` CPU counters are mach
+/// absolute-time ticks — convert with `mach_timebase_info` before /1e9.
 final class Sampler {
     private struct CpuSample {
-        var userSysNanos: UInt64
+        /// Sum of `pti_total_user` + `pti_total_system` — mach absolute-time ticks, not ns.
+        var userSysTicks: UInt64
         var at: TimeInterval
     }
 
     private var previous: [Int32: CpuSample] = [:]
     private var lastMachineTicks: (idle: UInt64, total: UInt64)?
+    /// Cached once; converts mach absolute-time ticks to nanoseconds.
+    private let tickToNanos: Double = {
+        var tb = mach_timebase_info_data_t()
+        mach_timebase_info(&tb)
+        return Double(tb.numer) / Double(tb.denom)
+    }()
 
     func snapshot(limit: Int = 40) -> (pulse: MachinePulse, rows: [LiveProcess]) {
         let now = ProcessInfo.processInfo.systemUptime
@@ -22,16 +30,17 @@ final class Sampler {
         for pid in pids {
             guard pid > 0 else { continue }
             guard var info = taskInfo(pid) else { continue }
-            let cpuNanos = info.pti_total_user &+ info.pti_total_system
+            let cpuTicks = info.pti_total_user &+ info.pti_total_system
             var cpuPercent = 0.0
             if let prior = previous[pid] {
                 let elapsed = now - prior.at
                 if elapsed > 0.05 {
-                    let delta = Double(cpuNanos &- prior.userSysNanos) / 1_000_000_000
-                    cpuPercent = max(0, delta / elapsed * 100)
+                    let deltaTicks = Double(cpuTicks &- prior.userSysTicks)
+                    let deltaSeconds = deltaTicks * tickToNanos / 1_000_000_000
+                    cpuPercent = max(0, deltaSeconds / elapsed * 100)
                 }
             }
-            previous[pid] = CpuSample(userSysNanos: cpuNanos, at: now)
+            previous[pid] = CpuSample(userSysTicks: cpuTicks, at: now)
 
             let path = processPath(pid)
             let running = NSRunningApplication(processIdentifier: pid)
