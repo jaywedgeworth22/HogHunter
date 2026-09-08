@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Generate project
+        run: xcodegen generate
+
+      - name: Build and test
+        run: |
+          if command -v xcpretty >/dev/null 2>&1; then
+            set -o pipefail
+            xcodebuild -scheme HogHunter -destination 'platform=macOS' -derivedDataPath build test \
+              CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" | xcpretty
+          else
+            xcodebuild -scheme HogHunter -destination 'platform=macOS' -derivedDataPath build test \
+              CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" -quiet
+          fi
