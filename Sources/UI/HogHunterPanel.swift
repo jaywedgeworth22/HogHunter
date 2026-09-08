@@ -17,7 +17,7 @@ struct HogHunterPanel: View {
         .padding(14)
         .frame(width: 400, height: 580)
         .background(Color(nsColor: .windowBackgroundColor))
-        .preferredColorScheme(.light)
+        .preferredColorScheme(store.appearance.colorScheme)
         .onAppear { store.panelVisible = true }
         .onDisappear { store.panelVisible = false }
         .alert(
@@ -44,8 +44,14 @@ struct HogHunterPanel: View {
     private var quitMessage: String {
         guard let row = pendingQuit else { return "" }
         let count = max(1, row.keys.count)
-        return "Asks \(row.name) to quit.  It may show a save prompt or refuse.  "
-            + "\(count) processes are included."
+        let included = count == 1
+            ? "1 process is included."
+            : "\(count) processes are included."
+        let forced = count == 1
+            ? "Force Quit ends 1 process immediately.  Unsaved work is lost."
+            : "Force Quit ends \(count) processes immediately.  Unsaved work is lost."
+        return "Asks \(row.name) to quit.  It may show a save prompt or refuse.  \(included)"
+            + "\n\n" + forced
     }
 
     // MARK: - Header
@@ -56,33 +62,115 @@ struct HogHunterPanel: View {
                 .foregroundStyle(Color(red: 0.86, green: 0.32, blue: 0.16))
             Text("Hog Hunter")
                 .font(.system(size: 18, weight: .semibold))
-            if store.isStale {
-                Circle()
-                    .fill(Color(red: 0.80, green: 0.52, blue: 0.10))
-                    .frame(width: 7, height: 7)
-                    .help("Sampling is behind.")
-                    .accessibilityLabel("Sampling is behind")
-            }
+            Circle()
+                .fill(store.isStale
+                      ? Color(red: 0.80, green: 0.52, blue: 0.10)
+                      : Color(red: 0.16, green: 0.58, blue: 0.30))
+                .frame(width: 7, height: 7)
+                .help(store.isStale ? "Sampling is behind." : "Sampling is up to date.")
+                .accessibilityLabel(store.isStale ? "Sampling is behind" : "Sampling is up to date")
             Spacer()
+            gearMenu
         }
+    }
+
+    private var gearMenu: some View {
+        Menu {
+            SettingsLink {
+                Text("Settings…")
+            }
+            Button("Activity Monitor") { HogActions.openActivityMonitor() }
+            Divider()
+            Button("Quit Hog Hunter") { NSApp.terminate(nil) }
+        } label: {
+            Image(systemName: "gearshape")
+                .font(.system(size: 13))
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Settings and Other Actions")
+        .accessibilityLabel("Settings and Other Actions")
     }
 
     // MARK: - Meters
 
     private var meters: some View {
-        HStack(spacing: 10) {
+        HStack(alignment: .top, spacing: 10) {
             Meter(
                 title: "CPU",
                 value: store.pulse.cpuPercent,
                 caption: store.hasBaseline ? store.cpuCaption : "Measuring…",
-                tint: Severity.forMachineCpu(store.pulse.cpuPercent).color
+                severity: Severity.forMachineCpu(store.pulse.cpuPercent)
             )
-            Meter(
-                title: "Memory",
-                value: store.pulse.memoryPercent,
-                caption: store.memoryCaption,
-                tint: Severity.forPressure(store.pulse.pressure).color
-            )
+            VStack(alignment: .leading, spacing: 6) {
+                Meter(
+                    title: "Memory",
+                    value: store.pulse.memoryPercent,
+                    caption: store.memorySizeCaption,
+                    severity: Severity.forPressure(store.pulse.pressure),
+                    accessibilityDetail: store.memoryCaption
+                )
+                if !pills.isEmpty {
+                    HStack(spacing: 5) {
+                        ForEach(pills, id: \.text) { pill in
+                            MeterPill(text: pill.text, severity: pill.severity, help: pill.help)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private struct Pill {
+        var text: String
+        var severity: Severity
+        var help: String
+    }
+
+    /// Swap, pressure and thermal, in the order they usually start to matter.
+    private var pills: [Pill] {
+        var out: [Pill] = []
+        if store.pulse.swapUsedBytes > 0 {
+            out.append(Pill(
+                text: "\(HogFormat.memory(store.pulse.swapUsedBytes)) swapped",
+                severity: Severity.forPressure(store.pulse.pressure),
+                help: "Memory the Mac has written to disk because RAM ran short."
+            ))
+        }
+        if store.pulse.pressure != .unknown {
+            out.append(Pill(
+                text: "Pressure \(store.pulse.pressure.label)",
+                severity: Severity.forPressure(store.pulse.pressure),
+                help: "How hard the Mac is working to find free memory."
+            ))
+        }
+        if store.pulse.thermalState != .nominal {
+            out.append(Pill(
+                text: "Thermal \(Self.thermalLabel(store.pulse.thermalState))",
+                severity: Self.thermalSeverity(store.pulse.thermalState),
+                help: "macOS slows the machine down as this rises."
+            ))
+        }
+        return out
+    }
+
+    private static func thermalLabel(_ state: ProcessInfo.ThermalState) -> String {
+        switch state {
+        case .nominal: return "nominal"
+        case .fair: return "fair"
+        case .serious: return "serious"
+        case .critical: return "critical"
+        @unknown default: return "unknown"
+        }
+    }
+
+    private static func thermalSeverity(_ state: ProcessInfo.ThermalState) -> Severity {
+        switch state {
+        case .nominal, .fair: return .calm
+        case .serious: return .elevated
+        case .critical: return .hot
+        @unknown default: return .calm
         }
     }
 
@@ -146,7 +234,8 @@ struct HogHunterPanel: View {
                     HogRowView(
                         row: row,
                         scale: store.cpuScale,
-                        coreCount: store.pulse.coreCount
+                        coreCount: store.pulse.coreCount,
+                        store: store
                     ) {
                         pendingQuit = row
                     }
@@ -172,113 +261,12 @@ struct HogHunterPanel: View {
             Text(store.scaleLegend)
                 .font(.system(size: 10.5))
                 .foregroundStyle(.secondary)
-            HStack {
-                Toggle("Launch at Login", isOn: Binding(
-                    get: { store.launchesAtLogin },
-                    set: { _ in store.toggleLoginItem() }
-                ))
-                .toggleStyle(.checkbox)
-                .font(.system(size: 12))
-                Spacer()
-                Button("Activity Monitor") {
-                    NSWorkspace.shared.open(
-                        URL(fileURLWithPath: "/System/Applications/Utilities/Activity Monitor.app")
-                    )
-                }
-                .buttonStyle(.plain)
-                .font(.system(size: 12, weight: .medium))
-                Button("Quit Hog Hunter") {
-                    NSApp.terminate(nil)
-                }
-                .buttonStyle(.plain)
-                .font(.system(size: 12, weight: .medium))
-            }
-        }
-    }
-}
-
-private struct Meter: View {
-    let title: String
-    let value: Double
-    let caption: String
-    let tint: Color
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.secondary)
-            ProgressView(value: min(max(value / 100, 0), 1))
-                .tint(tint)
-                .accessibilityLabel(title)
-                .accessibilityValue(caption)
-            Text(caption)
-                .font(.system(size: 11, design: .rounded).monospacedDigit())
-                .lineLimit(2)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .padding(10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.white))
-        .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(Color.black.opacity(0.08), lineWidth: 1)
-        )
-    }
-}
-
-private struct HogRowView: View {
-    let row: HogRow
-    let scale: CpuScale
-    let coreCount: Int
-    let onQuit: () -> Void
-
-    var body: some View {
-        HStack(spacing: 8) {
-            icon
-            VStack(alignment: .leading, spacing: 1) {
-                Text(row.name)
-                    .font(.system(size: 12.5, weight: .medium))
-                    .lineLimit(1)
-                Text(row.detail)
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-            Spacer(minLength: 4)
-            VStack(alignment: .trailing, spacing: 1) {
-                Text(HogFormat.cpu(row.cpuPercent, scale: scale, coreCount: coreCount))
-                    .font(.system(size: 12, weight: .semibold, design: .rounded).monospacedDigit())
-                    .foregroundStyle(Severity.forProcessCpu(row.cpuPercent).color)
-                Text(HogFormat.memory(row.memoryBytes))
-                    .font(.system(size: 10.5, design: .rounded).monospacedDigit())
-                    .foregroundStyle(.secondary)
-            }
-            if row.canQuit {
-                Button("Quit", action: onQuit)
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .help("Quit This Process")
-            }
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 6)
-        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.white.opacity(0.7)))
-        .accessibilityElement(children: .combine)
-    }
-
-    @ViewBuilder
-    private var icon: some View {
-        if let image = row.icon {
-            Image(nsImage: image)
-                .resizable()
-                .frame(width: 22, height: 22)
-                .accessibilityHidden(true)
-        } else {
-            Image(systemName: row.isApp ? "app.fill" : "gearshape")
-                .frame(width: 22, height: 22)
-                .foregroundStyle(.secondary)
-                .accessibilityHidden(true)
+            Toggle("Launch at Login", isOn: Binding(
+                get: { store.launchesAtLogin },
+                set: { _ in store.toggleLoginItem() }
+            ))
+            .toggleStyle(.checkbox)
+            .font(.system(size: 12))
         }
     }
 }

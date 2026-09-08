@@ -39,6 +39,15 @@ final class HogStore: ObservableObject {
     @Published var cpuScale: CpuScale = .perCore { didSet { persist() } }
     @Published var menuBarLabelMode: MenuBarLabelMode = .machinePercent { didSet { persist() } }
     @Published var refreshInterval: TimeInterval = 3 { didSet { persist(); restartTimer() } }
+    @Published var alertsEnabled = false { didSet { persist(); alertsSwitched() } }
+    /// Per-core, so 300 means three cores fully busy.
+    @Published var alertThresholdPercent: Double = 300 { didSet { persist() } }
+    @Published var alertSustainedMinutes: Int = 5 { didSet { persist() } }
+    @Published var appearance: AppearanceChoice = .light { didSet { persist() } }
+
+    /// Sustained-hog notifications.  Settings observes it directly for the
+    /// authorization answer.
+    let alerts = Alerts()
 
     /// UserDefaults keys, shared with any `@AppStorage` view that edits them.
     enum Key {
@@ -48,6 +57,10 @@ final class HogStore: ObservableObject {
         static let cpuScale = "cpuScale"
         static let menuBarLabelMode = "menuBarLabelMode"
         static let refreshInterval = "refreshInterval"
+        static let alertsEnabled = "alertsEnabled"
+        static let alertThresholdPercent = "alertThresholdPercent"
+        static let alertSustainedMinutes = "alertSustainedMinutes"
+        static let appearance = "appearance"
     }
 
     // MARK: - Machinery
@@ -169,6 +182,15 @@ final class HogStore: ObservableObject {
 
         liveRows = buildLiveRows(snapshot.processes, groups: groups)
         if window == .now { rows = liveRows }
+
+        if alertsEnabled {
+            alerts.evaluate(
+                rows: liveRows,
+                threshold: alertThresholdPercent,
+                sustained: TimeInterval(alertSustainedMinutes) * 60,
+                now: snapshot.pulse.sampledAt
+            )
+        }
 
         if tickIndex % Self.recordEvery == 0 {
             record(snapshot.processes, groupKeys: groupKeyByProcess, coreCount: snapshot.pulse.coreCount)
@@ -351,8 +373,13 @@ final class HogStore: ObservableObject {
         "\(HogFormat.percent(pulse.cpuPercent / 100)) of all \(pulse.coreCount) cores"
     }
 
+    /// Just the two numbers: "13.3 of 16 GB".
+    var memorySizeCaption: String {
+        "\(gigabytes(pulse.memoryUsedBytes)) of \(gigabytes(pulse.totalMemoryBytes)) GB"
+    }
+
     var memoryCaption: String {
-        var parts = ["\(gigabytes(pulse.memoryUsedBytes)) of \(gigabytes(pulse.totalMemoryBytes)) GB"]
+        var parts = [memorySizeCaption]
         if pulse.swapUsedBytes > 0 {
             parts.append("\(HogFormat.memory(pulse.swapUsedBytes)) swapped")
         }
@@ -402,7 +429,8 @@ final class HogStore: ObservableObject {
             guard let top = liveRows.max(by: { $0.cpuPercent < $1.cpuPercent }), top.cpuPercent >= 1 else {
                 return HogFormat.percent(pulse.cpuPercent / 100)
             }
-            return "\(top.name) \(HogFormat.cpu(top.cpuPercent, scale: cpuScale, coreCount: pulse.coreCount))"
+            let name = Self.truncated(top.name)
+            return "\(name) \(HogFormat.cpu(top.cpuPercent, scale: cpuScale, coreCount: pulse.coreCount))"
         }
     }
 
@@ -416,6 +444,13 @@ final class HogStore: ObservableObject {
             case .machineShare: return "Busiest app, as % of all \(pulse.coreCount) cores."
             }
         }
+    }
+
+    /// Keeps the menu bar from growing without limit when an app has a long
+    /// name.  About fourteen characters is as much as the bar can spare.
+    static func truncated(_ name: String, limit: Int = 14) -> String {
+        guard name.count > limit else { return name }
+        return String(name.prefix(limit - 1)).trimmingCharacters(in: .whitespaces) + "\u{2026}"
     }
 
     private func gigabytes(_ bytes: UInt64) -> String {
@@ -464,8 +499,16 @@ final class HogStore: ObservableObject {
         if let raw = defaults.string(forKey: Key.menuBarLabelMode), let value = MenuBarLabelMode(rawValue: raw) {
             menuBarLabelMode = value
         }
+        if let raw = defaults.string(forKey: Key.appearance), let value = AppearanceChoice(rawValue: raw) {
+            appearance = value
+        }
         let interval = defaults.double(forKey: Key.refreshInterval)
         if interval >= 1 { refreshInterval = interval }
+        alertsEnabled = defaults.object(forKey: Key.alertsEnabled) as? Bool ?? false
+        let threshold = defaults.double(forKey: Key.alertThresholdPercent)
+        if threshold >= 100 { alertThresholdPercent = threshold }
+        let sustained = defaults.integer(forKey: Key.alertSustainedMinutes)
+        if sustained >= 1 { alertSustainedMinutes = sustained }
     }
 
     private func persist() {
@@ -476,6 +519,17 @@ final class HogStore: ObservableObject {
         defaults.set(cpuScale.rawValue, forKey: Key.cpuScale)
         defaults.set(menuBarLabelMode.rawValue, forKey: Key.menuBarLabelMode)
         defaults.set(refreshInterval, forKey: Key.refreshInterval)
+        defaults.set(alertsEnabled, forKey: Key.alertsEnabled)
+        defaults.set(alertThresholdPercent, forKey: Key.alertThresholdPercent)
+        defaults.set(alertSustainedMinutes, forKey: Key.alertSustainedMinutes)
+        defaults.set(appearance.rawValue, forKey: Key.appearance)
+    }
+
+    /// Asks for notification permission the moment alerts are switched on, and
+    /// never before.  The Settings path goes through `defaultsChanged`.
+    private func alertsSwitched() {
+        guard !loadingSettings, alertsEnabled else { return }
+        alerts.requestAuthorization()
     }
 
     /// Picks up changes a Settings view made through `@AppStorage` on the same
@@ -509,9 +563,26 @@ final class HogStore: ObservableObject {
                let value = MenuBarLabelMode(rawValue: raw), value != self.menuBarLabelMode {
                 self.menuBarLabelMode = value
             }
+            if let raw = self.defaults.string(forKey: Key.appearance),
+               let value = AppearanceChoice(rawValue: raw), value != self.appearance {
+                self.appearance = value
+            }
             let interval = self.defaults.double(forKey: Key.refreshInterval)
             if interval >= 1, interval != self.refreshInterval {
                 self.refreshInterval = interval
+            }
+            let enabled = self.defaults.object(forKey: Key.alertsEnabled) as? Bool ?? false
+            if enabled != self.alertsEnabled {
+                self.alertsEnabled = enabled
+                if enabled { self.alerts.requestAuthorization() }
+            }
+            let threshold = self.defaults.double(forKey: Key.alertThresholdPercent)
+            if threshold >= 100, threshold != self.alertThresholdPercent {
+                self.alertThresholdPercent = threshold
+            }
+            let sustained = self.defaults.integer(forKey: Key.alertSustainedMinutes)
+            if sustained >= 1, sustained != self.alertSustainedMinutes {
+                self.alertSustainedMinutes = sustained
             }
         }
     }

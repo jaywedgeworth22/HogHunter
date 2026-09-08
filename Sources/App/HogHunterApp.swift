@@ -19,5 +19,10 @@ struct HogHunterApp: App {
             .accessibilityValue(store.menuBarHelp)
         }
         .menuBarExtraStyle(.window)
+
+        Settings {
+            SettingsView()
+                .environmentObject(store)
+        }
     }
 }

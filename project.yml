@@ -25,6 +25,7 @@ targets:
       - path: Sources
     dependencies:
       - sdk: ServiceManagement.framework
+      - sdk: UserNotifications.framework
       - sdk: libsqlite3.tbd
     settings:
       base:
