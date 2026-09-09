@@ -39,6 +39,10 @@ xcodebuild -scheme HogHunter -destination 'platform=macOS' test
 
 GitHub Actions (`.github/workflows/ci.yml`) runs the same test suite on every push to `main` and on every pull request, unsigned (`CODE_SIGNING_ALLOWED=NO`).
 
+## License
+
+Apache License 2.0.  See [LICENSE](LICENSE) for details.
+
 ## Notes
 
 Light appearance is the default.  Headings and buttons are Title Case.  Body copy is sentence case with two spaces between sentences.
