@@ -12,8 +12,9 @@ private let sqliteTransient = unsafeBitCast(-1, to: sqlite3_destructor_type.self
 /// as its own busy moments.  The database URL is always explicit so tests and
 /// command-line checks never touch the installed app's file.
 ///
-/// `@unchecked Sendable` is honest here: every entry point takes the same lock,
-/// and the store is only called from the sampling queue.
+/// `@unchecked Sendable` is honest here: every entry point serializes on the
+/// same lock, and the database is opened lazily inside that lock by whichever
+/// call comes first -- never on the main actor while the scene is being built.
 final class HistoryStore: @unchecked Sendable {
     struct Aggregate {
         var key: String
@@ -54,37 +55,64 @@ final class HistoryStore: @unchecked Sendable {
         var lastTs: Int64
     }
 
+    private let path: String
     private var db: OpaquePointer?
+    private var didOpen = false
     private let lock = NSLock()
     private var memo: [MemoKey: [Aggregate]] = [:]
     private var lastRecordedTs: Int64 = 0
     private var lastPrune = Date.distantPast
 
-    /// The most recent SQLite failure, for the panel to show.
+    /// The most recent SQLite failure, for the panel to show.  Cleared at the
+    /// start of `record` and of `aggregates`, which are the first call in each
+    /// of the two batches the store makes -- record then prune, aggregates then
+    /// coverage -- so the second call in a batch can never erase the first
+    /// call's error.  A failure to open is never cleared, because it never
+    /// stops being true.
     private(set) var lastError: String?
 
     static var defaultURL: URL {
-        let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             .appendingPathComponent("HogHunter", isDirectory: true)
-        try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        return root.appendingPathComponent("history.sqlite")
+            .appendingPathComponent("history.sqlite")
     }
 
     init(url: URL) {
-        open(path: url.path)
+        self.path = url.path
     }
 
     /// An in-memory database.  Used by tests and by any check that must not
     /// touch the installed app's history.
     init(inMemory: Bool) {
-        open(path: inMemory ? ":memory:" : Self.defaultURL.path)
+        self.path = inMemory ? ":memory:" : Self.defaultURL.path
     }
 
     deinit {
         if let db { sqlite3_close(db) }
     }
 
-    private func open(path: String) {
+    // MARK: - Opening
+
+    /// Opens, migrates and first-prunes the database if that has not happened
+    /// yet.  Every entry point calls this, so it is only needed directly by a
+    /// caller that wants the work to land on a particular queue -- `HogStore`
+    /// primes it on the sampling queue -- or by a test that inspects the file
+    /// without going through an entry point.
+    func openIfNeeded() {
+        lock.lock()
+        defer { lock.unlock() }
+        openLocked()
+    }
+
+    private func openLocked() {
+        guard !didOpen else { return }
+        didOpen = true
+        if path != ":memory:" {
+            try? FileManager.default.createDirectory(
+                at: URL(fileURLWithPath: path).deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+        }
         var handle: OpaquePointer?
         guard sqlite3_open(path, &handle) == SQLITE_OK else {
             lastError = "Could not open the history database."
@@ -95,15 +123,16 @@ final class HistoryStore: @unchecked Sendable {
         exec("PRAGMA journal_mode=WAL;", label: "journal mode")
         exec("PRAGMA synchronous=NORMAL;", label: "synchronous")
         migrate()
-        prune()
+        pruneLocked()
     }
 
     // MARK: - Schema
 
     private func migrate() {
         guard db != nil else { return }
-        let version = scalarInt("PRAGMA user_version")
-        if version < 2 {
+        // A failed read must not be taken for version 0: that would drop a
+        // perfectly good v2 `samples` table.
+        if let version = scalarInt("PRAGMA user_version"), version < 2 {
             // v1 stored raw mach ticks read as nanoseconds, so every CPU value
             // in it was 41.7x too small.  There is nothing worth migrating.
             exec("DROP TABLE IF EXISTS samples;", label: "drop v1 samples")
@@ -144,7 +173,9 @@ final class HistoryStore: @unchecked Sendable {
     ) {
         lock.lock()
         defer { lock.unlock() }
+        openLocked()
         guard let db else { return }
+        lastError = nil
 
         let ceiling = CpuMath.ceiling(coreCount: coreCount)
         let byCpu = samples.sorted { $0.cpuPercent > $1.cpuPercent }.prefix(25)
@@ -163,6 +194,17 @@ final class HistoryStore: @unchecked Sendable {
 
         let ts = Int64(date.timeIntervalSince1970)
         guard check(sqlite3_exec(db, "BEGIN", nil, nil, nil), "begin") else { return }
+
+        // `ts` is a whole second and `ticks` is keyed on it, so two ticks inside
+        // one second would leave one tick row and two sets of sample rows --
+        // doubling that second's sums while the divisor stayed at one.  Last
+        // write wins instead; this deletes nothing on the normal path.
+        var replaceStatement: OpaquePointer?
+        if check(sqlite3_prepare_v2(db, "DELETE FROM samples WHERE ts = ?", -1, &replaceStatement, nil), "prepare replace") {
+            sqlite3_bind_int64(replaceStatement, 1, ts)
+            _ = check(sqlite3_step(replaceStatement), "replace tick", expected: SQLITE_DONE)
+        }
+        sqlite3_finalize(replaceStatement)
 
         var tickStatement: OpaquePointer?
         if check(sqlite3_prepare_v2(db, "INSERT OR IGNORE INTO ticks(ts) VALUES(?)", -1, &tickStatement, nil), "prepare tick") {
@@ -209,7 +251,9 @@ final class HistoryStore: @unchecked Sendable {
     func aggregates(lookback: TimeInterval, groupByApp: Bool, sort: HogSort) -> [Aggregate] {
         lock.lock()
         defer { lock.unlock() }
+        openLocked()
         guard let db else { return [] }
+        lastError = nil
 
         let memoKey = MemoKey(lookback: lookback, groupByApp: groupByApp, sort: sort, lastTs: lastRecordedTs)
         if let cached = memo[memoKey] { return cached }
@@ -241,8 +285,17 @@ final class HistoryStore: @unchecked Sendable {
         defer { sqlite3_finalize(statement) }
         sqlite3_bind_int64(statement, 1, cutoff)
 
+        // The step code has to be captured, not compared inline: a schema that
+        // changed underneath this connection surfaces as an error here, not at
+        // prepare time, and "no more rows" and "the read failed" must not look
+        // the same to the panel.
         var out: [Aggregate] = []
-        while sqlite3_step(statement) == SQLITE_ROW {
+        while true {
+            let code = sqlite3_step(statement)
+            guard code == SQLITE_ROW else {
+                _ = check(code, "read aggregates", expected: SQLITE_DONE)
+                break
+            }
             let windowTicks = Int(sqlite3_column_int(statement, 8))
             guard windowTicks > 0 else { continue }
             out.append(
@@ -263,10 +316,14 @@ final class HistoryStore: @unchecked Sendable {
         return out
     }
 
-    /// How much of the window Hog Hunter was actually running for.
+    /// How much of the window Hog Hunter was actually running for.  Ticks are
+    /// counted at the caller's current cadence, so the answer is clamped to the
+    /// window: it can be short, but it can never claim more time than the
+    /// window holds.
     func coverage(lookback: TimeInterval, secondsPerTick: TimeInterval) -> Coverage {
         lock.lock()
         defer { lock.unlock() }
+        openLocked()
         guard let db else { return Coverage(tickCount: 0, sampledSeconds: 0, firstTimestamp: nil) }
         let cutoff = Int64(Date().timeIntervalSince1970 - lookback)
         var statement: OpaquePointer?
@@ -277,7 +334,12 @@ final class HistoryStore: @unchecked Sendable {
         }
         defer { sqlite3_finalize(statement) }
         sqlite3_bind_int64(statement, 1, cutoff)
-        guard sqlite3_step(statement) == SQLITE_ROW else {
+        // A bare aggregate with no GROUP BY always returns exactly one row, so
+        // an empty window arrives as a row with a count of 0.  Anything that is
+        // not a row is a real failure, never "nothing recorded yet".
+        let code = sqlite3_step(statement)
+        guard code == SQLITE_ROW else {
+            lastError = "History read coverage failed (\(code))."
             return Coverage(tickCount: 0, sampledSeconds: 0, firstTimestamp: nil)
         }
         let count = Int(sqlite3_column_int(statement, 0))
@@ -286,7 +348,7 @@ final class HistoryStore: @unchecked Sendable {
             : Date(timeIntervalSince1970: Double(sqlite3_column_int64(statement, 1)))
         return Coverage(
             tickCount: count,
-            sampledSeconds: Double(count) * secondsPerTick,
+            sampledSeconds: min(Double(count) * secondsPerTick, lookback),
             firstTimestamp: first
         )
     }
@@ -296,6 +358,12 @@ final class HistoryStore: @unchecked Sendable {
     func prune(olderThan retention: TimeInterval = 24 * 60 * 60, force: Bool = false) {
         lock.lock()
         defer { lock.unlock() }
+        openLocked()
+        pruneLocked(olderThan: retention, force: force)
+    }
+
+    private func pruneLocked(olderThan retention: TimeInterval = 24 * 60 * 60, force: Bool = false) {
+        guard db != nil else { return }
         let now = Date()
         if !force, now.timeIntervalSince(lastPrune) < 20 * 60 { return }
         lastPrune = now
@@ -326,15 +394,21 @@ final class HistoryStore: @unchecked Sendable {
         return false
     }
 
-    private func scalarInt(_ sql: String) -> Int {
-        guard let db else { return 0 }
+    /// Nil when the value could not be read, which the caller must not confuse
+    /// with a legitimate zero.
+    private func scalarInt(_ sql: String) -> Int? {
+        guard let db else { return nil }
         var statement: OpaquePointer?
-        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+        guard check(sqlite3_prepare_v2(db, sql, -1, &statement, nil), "prepare \(sql)") else {
             sqlite3_finalize(statement)
-            return 0
+            return nil
         }
         defer { sqlite3_finalize(statement) }
-        guard sqlite3_step(statement) == SQLITE_ROW else { return 0 }
+        let code = sqlite3_step(statement)
+        guard code == SQLITE_ROW else {
+            lastError = "History read \(sql) failed (\(code))."
+            return nil
+        }
         return Int(sqlite3_column_int(statement, 0))
     }
 

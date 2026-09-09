@@ -54,6 +54,18 @@ final class HogFormatTests: XCTestCase {
         XCTAssertEqual(HogFormat.memory(0), "0 KB")
     }
 
+    func testMemoryNeverPrintsTheNextUnitDown() {
+        // Rounding is applied before the unit is chosen, so a value that would
+        // print as "1024 MB" is promoted to GB instead.
+        XCTAssertEqual(HogFormat.memory(1_073_741_823), "1.0 GB")
+        XCTAssertEqual(HogFormat.memory(1_073_217_536), "1.0 GB")
+        XCTAssertEqual(HogFormat.memory(1_073_207_050), "1023 MB")
+        XCTAssertEqual(HogFormat.memory(1_048_575), "1 MB")
+        XCTAssertEqual(HogFormat.memory(1_048_064), "1 MB")
+        XCTAssertEqual(HogFormat.memory(1_048_000), "1023 KB")
+        XCTAssertEqual(HogFormat.rate(1_073_741_823), "1.0 GB/s")
+    }
+
     // MARK: - HogFormat.rate
 
     func testRateZeroShowsZeroKBPerSecond() {

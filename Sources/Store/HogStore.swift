@@ -20,7 +20,19 @@ final class HogStore: ObservableObject {
     @Published private(set) var hasBaseline = false
     @Published private(set) var isStale = false
     @Published private(set) var launchesAtLogin = false
+    /// Failures the user should act on: a sample that would not run, a quit
+    /// that went wrong.  Shown in red.
     @Published var lastError: String?
+    /// A neutral summary of what a quit actually did, which is often not an
+    /// error at all ("Quit 1, skipped Safari is a system process.").
+    @Published var lastNotice: String?
+    /// The history database's own last failure, kept apart so a history tick
+    /// cannot wipe a quit or sample message, and so a recovered database
+    /// clears its own stale string.
+    @Published private(set) var historyError: String?
+    /// Only `toggleLoginItem` writes this, so Settings can show it beside the
+    /// toggle it actually belongs to.
+    @Published private(set) var loginItemError: String?
 
     /// Set by the panel.  Metadata resolution beyond the menu bar's top hog and
     /// all history aggregation are gated on this.
@@ -33,9 +45,9 @@ final class HogStore: ObservableObject {
 
     // MARK: - Persisted choices
 
-    @Published var window: TimeWindow = .now { didSet { persist(); choiceChanged() } }
-    @Published var grouping: HogGrouping = .apps { didSet { persist(); choiceChanged() } }
-    @Published var sort: HogSort = .cpu { didSet { persist(); choiceChanged() } }
+    @Published var window: TimeWindow = .now { didSet { persist(); scheduleChoiceChanged() } }
+    @Published var grouping: HogGrouping = .apps { didSet { persist(); scheduleChoiceChanged() } }
+    @Published var sort: HogSort = .cpu { didSet { persist(); scheduleChoiceChanged() } }
     @Published var cpuScale: CpuScale = .perCore { didSet { persist() } }
     @Published var menuBarLabelMode: MenuBarLabelMode = .machinePercent { didSet { persist() } }
     @Published var refreshInterval: TimeInterval = 3 { didSet { persist(); restartTimer() } }
@@ -77,6 +89,7 @@ final class HogStore: ObservableObject {
     private var started = false
     private var tickIndex = 0
     private var loadingSettings = false
+    private var lastTickAt = Date.distantPast
 
     private var samples: [ProcessKey: ProcessSample] = [:]
     private var liveRows: [HogRow] = []
@@ -112,6 +125,14 @@ final class HogStore: ObservableObject {
         guard !started else { return }
         started = true
         refreshLoginItem()
+        // Opening, migrating and first-pruning the database is up to half a
+        // second of work on an upgrade, so it happens on the sampling queue.
+        // The queue is serial, so this lands before the first tick's snapshot.
+        let history = self.history
+        queue.async { history.openIfNeeded() }
+        // Settle the notification decision now rather than at the moment the
+        // first alert fires, which would post before the prompt was answered.
+        if alertsEnabled { alerts.requestAuthorization() }
         tick()
         restartTimer()
         watchMemoryPressure()
@@ -120,6 +141,8 @@ final class HogStore: ObservableObject {
     func stop() {
         timer?.invalidate()
         timer = nil
+        pressureSource?.cancel()
+        pressureSource = nil
         started = false
     }
 
@@ -137,10 +160,21 @@ final class HogStore: ObservableObject {
         self.timer = timer
     }
 
+    /// Pressure transitions ask for a fresh reading, but a full pass over the
+    /// process table is the most expensive thing Hog Hunter does and pressure
+    /// flapping is exactly when the machine can least afford it.  A pressure
+    /// tick replaces the next scheduled one rather than adding to it, so the
+    /// rate is capped at one pass per refresh interval however hard it flaps.
     private func watchMemoryPressure() {
+        pressureSource?.cancel()
         let source = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical], queue: .main)
         source.setEventHandler { [weak self] in
-            Task { @MainActor in self?.tick() }
+            Task { @MainActor in
+                guard let self else { return }
+                guard Date().timeIntervalSince(self.lastTickAt) >= self.refreshInterval else { return }
+                self.tick()
+                self.restartTimer()
+            }
         }
         source.resume()
         pressureSource = source
@@ -150,6 +184,7 @@ final class HogStore: ObservableObject {
 
     func tick() {
         guard !isSampling else { return }
+        lastTickAt = Date()
         isSampling = true
         let sampler = self.sampler
         queue.async {
@@ -185,7 +220,7 @@ final class HogStore: ObservableObject {
 
         if alertsEnabled {
             alerts.evaluate(
-                rows: liveRows,
+                candidates: alertCandidates(snapshot.processes, groups: groups),
                 threshold: alertThresholdPercent,
                 sustained: TimeInterval(alertSustainedMinutes) * 60,
                 now: snapshot.pulse.sampledAt
@@ -195,8 +230,8 @@ final class HogStore: ObservableObject {
         if tickIndex % Self.recordEvery == 0 {
             record(snapshot.processes, groupKeys: groupKeyByProcess, coreCount: snapshot.pulse.coreCount)
         }
-        if tickIndex % 20 == 0 {
-            resolver.pruneIfNeeded(live: Set(samples.keys))
+        if tickIndex % 60 == 0 {
+            resolver.prune(live: Set(samples.keys))
         }
         if window != .now { refreshHistory() }
     }
@@ -218,6 +253,68 @@ final class HogStore: ObservableObject {
         }
     }
 
+    // MARK: - Row identity
+
+    /// Row ids are shared with `AlertPolicy`, so both live in one place.  The
+    /// two grouping modes keep separate namespaces on purpose: an app's summed
+    /// CPU and one member process's CPU are different measurements and must not
+    /// share a sustained clock.
+    private static func processRowId(_ key: ProcessKey) -> String {
+        "p-\(key.pid)-\(key.startTime)"
+    }
+
+    private static func groupRowId(_ key: String) -> String {
+        "a-\(key)"
+    }
+
+    /// The member whose metadata stands for the whole group: its owner when
+    /// there is one, otherwise its largest process.
+    private func anchorKey(_ group: Grouping.Group) -> ProcessKey {
+        if let owner = group.ownerPid,
+           let sample = group.members.first(where: { $0.key.pid == owner }) {
+            return sample.key
+        }
+        return group.members.max(by: { $0.footprintBytes < $1.footprintBytes })?.key ?? group.members[0].key
+    }
+
+    // MARK: - Alerts
+
+    /// Everything at or above the alert threshold, whatever the panel is
+    /// showing.  Alerting must not depend on the display list: with Sort set to
+    /// Memory, a process burning six cores can sit far outside the 25 largest
+    /// memory consumers and would never be considered at all.  Filtering by the
+    /// threshold first keeps this cheap -- the set is bounded by total CPU
+    /// divided by the threshold, so it is normally empty.
+    private func alertCandidates(
+        _ processes: [ProcessSample],
+        groups: [Grouping.Group]
+    ) -> [Alerts.Candidate] {
+        let threshold = alertThresholdPercent
+        if grouping == .processes {
+            let above = processes.filter { $0.cpuPercent >= threshold }
+            guard !above.isEmpty else { return [] }
+            let metadata = resolver.resolve(above.map(\.key), samples: samples)
+            return above.map { process in
+                Alerts.Candidate(
+                    id: Self.processRowId(process.key),
+                    name: metadata[process.key]?.displayName ?? process.name,
+                    cpuPercent: process.cpuPercent
+                )
+            }
+        }
+        let above = groups.filter { $0.cpuPercent >= threshold }
+        guard !above.isEmpty else { return [] }
+        let anchors = above.map(anchorKey)
+        let metadata = resolver.resolve(anchors, samples: samples)
+        return zip(above, anchors).map { group, anchor in
+            Alerts.Candidate(
+                id: Self.groupRowId(group.key),
+                name: metadata[anchor]?.displayName ?? group.name,
+                cpuPercent: group.cpuPercent
+            )
+        }
+    }
+
     // MARK: - Live rows
 
     private func buildLiveRows(_ processes: [ProcessSample], groups: [Grouping.Group]) -> [HogRow] {
@@ -228,7 +325,7 @@ final class HogStore: ObservableObject {
             return ranked.map { process in
                 let reason = ProcessControl.blockReason(for: process)
                 return HogRow(
-                    id: "p-\(process.key.pid)-\(process.key.startTime)",
+                    id: Self.processRowId(process.key),
                     keys: [process.key],
                     name: metadata[process.key]?.displayName ?? process.name,
                     detail: "pid \(process.key.pid) · \(process.threadCount) threads",
@@ -247,20 +344,14 @@ final class HogStore: ObservableObject {
         }
 
         let ranked = groups.sorted(by: groupOrder).prefix(Self.rowLimit)
-        let anchors = ranked.map { group -> ProcessKey in
-            if let owner = group.ownerPid,
-               let sample = group.members.first(where: { $0.key.pid == owner }) {
-                return sample.key
-            }
-            return group.members.max(by: { $0.footprintBytes < $1.footprintBytes })?.key ?? group.members[0].key
-        }
+        let anchors = ranked.map(anchorKey)
         let metadata = resolver.resolve(anchors, samples: samples)
 
         return zip(ranked, anchors).map { group, anchor in
             let blocks = group.members.map { ProcessControl.blockReason(for: $0) }
             let canQuit = blocks.contains(where: { $0 == nil })
             return HogRow(
-                id: "a-\(group.key)",
+                id: Self.groupRowId(group.key),
                 keys: group.members.map(\.key),
                 name: metadata[anchor]?.displayName ?? group.name,
                 detail: groupDetail(group),
@@ -310,6 +401,17 @@ final class HogStore: ObservableObject {
 
     // MARK: - History rows
 
+    /// A `@Published` `didSet` runs while SwiftUI is applying the picker's own
+    /// binding, and reassigning `rows` there draws "Publishing changes from
+    /// within view updates is not allowed".  The rebuild is hopped to the next
+    /// main-actor turn, which is the same run loop pass as far as the user is
+    /// concerned: the picker still refreshes immediately.
+    private func scheduleChoiceChanged() {
+        Task { @MainActor [weak self] in
+            self?.choiceChanged()
+        }
+    }
+
     private func choiceChanged() {
         if window == .now {
             rows = liveRows
@@ -341,7 +443,7 @@ final class HogStore: ObservableObject {
         error: String?
     ) {
         self.coverage = coverage
-        if let error { lastError = error }
+        historyError = error
         historyRows = aggregates.prefix(Self.rowLimit).map { item in
             HogRow(
                 id: "h-\(item.key)",
@@ -421,14 +523,29 @@ final class HogStore: ObservableObject {
         return "Sampled \(HogFormat.duration(coverage.sampledSeconds)) of the last \(windowLabel)."
     }
 
+    /// The row the menu bar would name, or nil when nothing is busy enough --
+    /// including before the first two samples, when every row still reads 0%.
+    private var menuBarTopHog: HogRow? {
+        guard let top = liveRows.max(by: { $0.cpuPercent < $1.cpuPercent }), top.cpuPercent >= 1 else {
+            return nil
+        }
+        return top
+    }
+
+    private var machinePercentLabel: String {
+        HogFormat.percent(pulse.cpuPercent / 100)
+    }
+
+    private var machinePercentHelp: String {
+        "CPU across all \(pulse.coreCount) cores."
+    }
+
     var menuBarLabel: String {
         switch menuBarLabelMode {
         case .machinePercent:
-            return HogFormat.percent(pulse.cpuPercent / 100)
+            return machinePercentLabel
         case .topHogName:
-            guard let top = liveRows.max(by: { $0.cpuPercent < $1.cpuPercent }), top.cpuPercent >= 1 else {
-                return HogFormat.percent(pulse.cpuPercent / 100)
-            }
+            guard let top = menuBarTopHog else { return machinePercentLabel }
             let name = Self.truncated(top.name)
             return "\(name) \(HogFormat.cpu(top.cpuPercent, scale: cpuScale, coreCount: pulse.coreCount))"
         }
@@ -437,12 +554,29 @@ final class HogStore: ObservableObject {
     var menuBarHelp: String {
         switch menuBarLabelMode {
         case .machinePercent:
-            return "CPU across all \(pulse.coreCount) cores."
+            return machinePercentHelp
         case .topHogName:
+            // The label silently falls back to the machine percentage when no
+            // row is busy, so the help has to fall back with it or it names a
+            // scale the number is not on.
+            guard menuBarTopHog != nil else { return machinePercentHelp }
             switch cpuScale {
             case .perCore: return "Busiest app, as % of one core."
             case .machineShare: return "Busiest app, as % of all \(pulse.coreCount) cores."
             }
+        }
+    }
+
+    /// What VoiceOver reads for the menu bar item: the live number, untruncated.
+    /// `menuBarHelp` is already spoken as the hint by `.help`, so repeating it
+    /// as the value would say the same sentence twice and the number never.
+    var menuBarAccessibilityValue: String {
+        switch menuBarLabelMode {
+        case .machinePercent:
+            return machinePercentLabel
+        case .topHogName:
+            guard let top = menuBarTopHog else { return machinePercentLabel }
+            return "\(top.name) \(HogFormat.cpu(top.cpuPercent, scale: cpuScale, coreCount: pulse.coreCount))"
         }
     }
 
@@ -463,14 +597,18 @@ final class HogStore: ObservableObject {
 
     func quit(_ row: HogRow, force: Bool) {
         lastError = nil
+        lastNotice = nil
         let outcome = ProcessControl.quit(row, force: force)
-        lastError = outcome.message
+        // Often not a failure at all -- "Quit 1, skipped Safari is a system
+        // process." is a summary -- so it does not go in the red channel.
+        lastNotice = outcome.message
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             self?.tick()
         }
     }
 
     func toggleLoginItem() {
+        loginItemError = nil
         do {
             if launchesAtLogin {
                 try SMAppService.mainApp.unregister()
@@ -479,7 +617,7 @@ final class HogStore: ObservableObject {
             }
             refreshLoginItem()
         } catch {
-            lastError = error.localizedDescription
+            loginItemError = error.localizedDescription
         }
     }
 
@@ -543,17 +681,14 @@ final class HogStore: ObservableObject {
             if let raw = self.defaults.string(forKey: Key.window),
                let value = TimeWindow(rawValue: raw), value != self.window {
                 self.window = value
-                self.choiceChanged()
             }
             if let raw = self.defaults.string(forKey: Key.grouping),
                let value = HogGrouping(rawValue: raw), value != self.grouping {
                 self.grouping = value
-                self.choiceChanged()
             }
             if let raw = self.defaults.string(forKey: Key.sort),
                let value = HogSort(rawValue: raw), value != self.sort {
                 self.sort = value
-                self.choiceChanged()
             }
             if let raw = self.defaults.string(forKey: Key.cpuScale),
                let value = CpuScale(rawValue: raw), value != self.cpuScale {

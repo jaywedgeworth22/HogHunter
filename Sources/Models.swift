@@ -202,14 +202,22 @@ struct HogRow: Identifiable, Hashable {
         hasher.combine(id)
     }
 
+    /// Every stored property except `icon`, which is an `NSImage` reference
+    /// that is stable per bundle and would only ever compare by identity.
     static func == (lhs: HogRow, rhs: HogRow) -> Bool {
         lhs.id == rhs.id
             && lhs.cpuPercent == rhs.cpuPercent
             && lhs.memoryBytes == rhs.memoryBytes
             && lhs.keys == rhs.keys
+            && lhs.name == rhs.name
             && lhs.detail == rhs.detail
-            && lhs.canQuit == rhs.canQuit
+            && lhs.path == rhs.path
+            && lhs.isApp == rhs.isApp
+            && lhs.isGroup == rhs.isGroup
+            && lhs.peakMemoryBytes == rhs.peakMemoryBytes
             && lhs.presence == rhs.presence
+            && lhs.canQuit == rhs.canQuit
+            && lhs.quitBlockReason == rhs.quitBlockReason
     }
 }
 
@@ -270,13 +278,16 @@ enum HogFormat {
     }
 
     /// Binary units labeled GB and MB, like Activity Monitor.  Integer MB
-    /// below 1 GB, one decimal GB above.
+    /// below 1 GB, one decimal GB above.  The unit is chosen against the value
+    /// the next unit down would round to, so "1024 MB" and "1024 KB" -- which
+    /// are just the next unit up -- can never be printed.
     static func memory(_ bytes: UInt64) -> String {
         let gb = Double(bytes) / 1_073_741_824
-        if gb >= 1 { return String(format: "%.1f GB", gb) }
         let mb = Double(bytes) / 1_048_576
-        if mb >= 1 { return String(format: "%.0f MB", mb) }
-        return String(format: "%.0f KB", Double(bytes) / 1024)
+        let kb = Double(bytes) / 1024
+        if mb >= 1023.5 { return String(format: "%.1f GB", gb) }
+        if kb >= 1023.5 { return String(format: "%.0f MB", mb) }
+        return String(format: "%.0f KB", kb)
     }
 
     /// "12 MB/s", "1.4 GB/s", "0 KB/s".

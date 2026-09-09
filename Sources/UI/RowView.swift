@@ -183,7 +183,10 @@ enum SampleReport {
             process.executableURL = URL(fileURLWithPath: "/usr/bin/sample")
             process.arguments = [String(pid), String(seconds), "-file", url.path]
             let errors = Pipe()
-            process.standardOutput = Pipe()
+            // The report goes to the `-file` path, so stdout carries nothing
+            // worth keeping.  /dev/null rather than an undrained pipe, which
+            // would deadlock the moment `sample` did write something.
+            process.standardOutput = FileHandle.nullDevice
             process.standardError = errors
             do {
                 try process.run()

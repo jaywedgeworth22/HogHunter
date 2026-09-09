@@ -171,6 +171,20 @@ final class HistoryStoreTests: XCTestCase {
         XCTAssertEqual(first.timeIntervalSince1970, t0.timeIntervalSince1970, accuracy: 1.0)
     }
 
+    func testCoverageNeverClaimsMoreTimeThanTheWindowHolds() {
+        let store = HistoryStore(inMemory: true)
+        let t0 = Date()
+        let s = sample(pid: 71, start: 1, name: "Coverage", cpu: 5, memory: 1)
+
+        store.record(samples: [s], groupKey: { $0.name }, bundleId: { _ in nil }, coreCount: 4, at: t0)
+        store.record(samples: [s], groupKey: { $0.name }, bundleId: { _ in nil }, coreCount: 4, at: t0.addingTimeInterval(5))
+
+        // Ticks recorded at one cadence and read back at a slower one would
+        // otherwise report more sampled time than the window contains.
+        let coverage = store.coverage(lookback: 30, secondsPerTick: 25)
+        XCTAssertEqual(coverage.sampledSeconds, 30, accuracy: 0.0001)
+    }
+
     // MARK: - Pruning
 
     func testPruneRemovesRowsOlderThanTheRetentionWindow() {
@@ -188,6 +202,77 @@ final class HistoryStoreTests: XCTestCase {
 
         let coverage = store.coverage(lookback: 48 * 3600, secondsPerTick: 1)
         XCTAssertEqual(coverage.tickCount, 1, "only the recent tick should survive a 24h prune")
+    }
+
+    // MARK: - Same-second ticks
+
+    func testTwoRecordsInOneSecondReplaceRatherThanAccumulate() {
+        let store = HistoryStore(inMemory: true)
+        let t0 = Date()
+        let hog = sample(pid: 90, start: 1, name: "Dup", cpu: 100, memory: 500_000)
+
+        // `ts` has one-second resolution and `ticks` is keyed on it, so a
+        // second record inside the same second used to double that timestamp's
+        // sums while the divisor stayed at one.
+        store.record(samples: [hog], groupKey: { $0.name }, bundleId: { _ in nil }, coreCount: 4, at: t0)
+        store.record(samples: [hog], groupKey: { $0.name }, bundleId: { _ in nil }, coreCount: 4, at: t0)
+
+        let results = store.aggregates(lookback: 3600, groupByApp: false, sort: .cpu)
+        let row = try! XCTUnwrap(aggregate(results, pid: 90, start: 1))
+        XCTAssertEqual(row.avgCpu, 100, accuracy: 0.0001)
+        XCTAssertEqual(row.peakCpu, 100, accuracy: 0.0001)
+        XCTAssertEqual(row.avgMemoryBytes, 500_000, accuracy: 0.5)
+        XCTAssertEqual(row.peakMemoryBytes, 500_000)
+        XCTAssertEqual(row.sampleCount, 1)
+        XCTAssertEqual(row.windowTicks, 1)
+    }
+
+    // MARK: - Error reporting
+
+    func testAFailureToOpenSurvivesLaterCalls() {
+        // A path no directory can be created for, so `sqlite3_open` fails.
+        let store = HistoryStore(url: URL(fileURLWithPath: "/dev/null/hoghunter/history.sqlite"))
+        store.openIfNeeded()
+        XCTAssertNotNil(store.lastError, "an unopenable database must say so")
+
+        _ = store.aggregates(lookback: 3600, groupByApp: false, sort: .cpu)
+        _ = store.coverage(lookback: 3600, secondsPerTick: 3)
+        XCTAssertNotNil(store.lastError, "the open failure never stops being true")
+    }
+
+    func testLastErrorClearsOnceQueriesWorkAgain() throws {
+        let scratchDir = URL(
+            fileURLWithPath: "/private/tmp/claude-501/-Users-jay-Code-HogHunter/da3e5df1-ebc2-4be9-8c4e-126b394e8ab3/scratchpad/impl-tests",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: scratchDir, withIntermediateDirectories: true)
+        let dbURL = scratchDir.appendingPathComponent("recovery-\(UUID().uuidString).sqlite")
+        defer { for suffix in ["", "-wal", "-shm"] { try? FileManager.default.removeItem(atPath: dbURL.path + suffix) } }
+
+        let store = HistoryStore(url: dbURL)
+        store.record(
+            samples: [sample(pid: 95, start: 1, name: "Recover", cpu: 10, memory: 1000)],
+            groupKey: { $0.name },
+            bundleId: { _ in nil },
+            coreCount: 4
+        )
+        XCTAssertNil(store.lastError)
+
+        // Pull the table out from under the open connection.
+        try runSQLite(at: dbURL.path, sql: "DROP TABLE samples;")
+        _ = store.aggregates(lookback: 3600, groupByApp: false, sort: .cpu)
+        XCTAssertNotNil(store.lastError, "a query against a missing table must be reported")
+
+        try runSQLite(
+            at: dbURL.path,
+            sql: """
+            CREATE TABLE samples (ts INTEGER NOT NULL, pid INTEGER NOT NULL, start INTEGER NOT NULL,
+              key TEXT NOT NULL, group_key TEXT NOT NULL, name TEXT NOT NULL, bundle TEXT,
+              cpu REAL NOT NULL, mem INTEGER NOT NULL, reason INTEGER NOT NULL);
+            """
+        )
+        _ = store.aggregates(lookback: 3600, groupByApp: false, sort: .cpu)
+        XCTAssertNil(store.lastError, "a stale failure must not sit in the panel once queries work again")
     }
 
     // MARK: - Migration
@@ -211,7 +296,11 @@ final class HistoryStoreTests: XCTestCase {
         )
         XCTAssertEqual(try runSQLite(at: dbURL.path, sql: "PRAGMA user_version;").trimmed, "0")
 
+        // The store opens lazily, on whichever queue asks first, so that the
+        // app does not migrate on the main actor during scene construction.
+        // Nothing here goes through a normal entry point, so ask explicitly.
         var store: HistoryStore? = HistoryStore(url: dbURL)
+        store?.openIfNeeded()
         XCTAssertNil(store?.lastError)
         store = nil  // Closes the connection so a fresh process can reopen the file.
 

@@ -185,7 +185,19 @@ struct HogHunterPanel: View {
                     .font(.system(size: 10.5))
                     .foregroundStyle(.secondary)
             }
+            if let notice = store.lastNotice {
+                Text(notice)
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if let error = store.lastError {
+                Text(error)
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if let error = store.historyError {
                 Text(error)
                     .font(.system(size: 10.5))
                     .foregroundStyle(.red)
@@ -254,6 +266,20 @@ struct HogHunterPanel: View {
 
     private var footer: some View {
         VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Toggle("Launch at Login", isOn: Binding(
+                    get: { store.launchesAtLogin },
+                    set: { _ in store.toggleLoginItem() }
+                ))
+                .toggleStyle(.checkbox)
+                .font(.system(size: 12))
+                if let error = store.loginItemError {
+                    Text(error)
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
             Text(store.coverageNote)
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
@@ -261,12 +287,6 @@ struct HogHunterPanel: View {
             Text(store.scaleLegend)
                 .font(.system(size: 10.5))
                 .foregroundStyle(.secondary)
-            Toggle("Launch at Login", isOn: Binding(
-                get: { store.launchesAtLogin },
-                set: { _ in store.toggleLoginItem() }
-            ))
-            .toggleStyle(.checkbox)
-            .font(.system(size: 12))
         }
     }
 }

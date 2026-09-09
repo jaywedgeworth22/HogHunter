@@ -87,13 +87,14 @@ struct SettingsView: View {
     // MARK: - Launch at Login
 
     private var loginSection: some View {
-        Section("Launch at Login") {
+        Section("Startup") {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Toggle("Open Hog Hunter at Login", isOn: Binding(
+                // The same name the panel's footer and the coverage note use.
+                Toggle("Launch at Login", isOn: Binding(
                     get: { store.launchesAtLogin },
                     set: { _ in store.toggleLoginItem() }
                 ))
-                if let error = store.lastError {
+                if let error = store.loginItemError {
                     Text(error)
                         .font(.system(size: 11))
                         .foregroundStyle(.red)

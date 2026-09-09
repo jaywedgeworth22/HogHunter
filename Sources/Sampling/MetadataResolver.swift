@@ -1,6 +1,18 @@
 import AppKit
 import Foundation
 
+/// The part of `NSRunningApplication` the resolver reads.  It exists so a test
+/// can prove the table is read once per pid rather than once per tick.
+protocol RunningApplicationInfo {
+    var processIdentifier: pid_t { get }
+    var bundleIdentifier: String? { get }
+    var localizedName: String? { get }
+    var activationPolicy: NSApplication.ActivationPolicy { get }
+    var bundleURL: URL? { get }
+}
+
+extension NSRunningApplication: RunningApplicationInfo {}
+
 /// Turns process keys into names, bundle identifiers and icons.
 ///
 /// Everything here touches AppKit, so it lives on the main actor and is only
@@ -17,14 +29,19 @@ final class MetadataResolver {
         var isRunningApplication: Bool
     }
 
-    /// What `NSWorkspace.runningApplications` already knows, refreshed once per
-    /// tick.  This is in-process state, not a LaunchServices query, so it is
-    /// cheap enough to read for every pid.
+    /// What `NSWorkspace.runningApplications` knows about one process.  Reading
+    /// these four properties is not free -- measured at 40-50 ms for ~250 apps
+    /// on an M5 -- so an entry is built once per pid and reused for as long as
+    /// that pid is still running.
     struct AppInfo {
         var bundleId: String?
         var localizedName: String?
         var activationPolicy: NSApplication.ActivationPolicy
         var bundleURL: URL?
+
+        /// A freshly launched app publishes these asynchronously, so a partly
+        /// filled entry is re-read next tick instead of being frozen.
+        var isSettled: Bool { bundleId != nil && localizedName != nil && bundleURL != nil }
     }
 
     private(set) var runningApps: [pid_t: AppInfo] = [:]
@@ -32,14 +49,29 @@ final class MetadataResolver {
     private var iconByBundle: [String: NSImage?] = [:]
     private var iconByPath: [String: NSImage?] = [:]
     private var urlByBundle: [String: URL?] = [:]
-    private var ticksSincePrune = 0
+    private var nameByBundle: [String: String] = [:]
+    private let enumerate: () -> [RunningApplicationInfo]
 
-    /// Refreshes the running-application table and returns it.
+    init(runningApplications: @escaping () -> [RunningApplicationInfo] = { NSWorkspace.shared.runningApplications }) {
+        self.enumerate = runningApplications
+    }
+
+    /// Refreshes the running-application table and returns it.  Enumerating is
+    /// cheap; reading each app's properties is not, so a pid already in the
+    /// table keeps the entry it had.  A recycled pid can therefore carry the
+    /// previous app's name for one tick, which is the same risk the per-key
+    /// metadata cache already takes and is invisible at a 3 s cadence.
     @discardableResult
     func refreshRunningApps() -> [pid_t: AppInfo] {
         var table: [pid_t: AppInfo] = [:]
-        for app in NSWorkspace.shared.runningApplications {
-            table[app.processIdentifier] = AppInfo(
+        table.reserveCapacity(runningApps.count)
+        for app in enumerate() {
+            let pid = app.processIdentifier
+            if let known = runningApps[pid], known.isSettled {
+                table[pid] = known
+                continue
+            }
+            table[pid] = AppInfo(
                 bundleId: app.bundleIdentifier,
                 localizedName: app.localizedName,
                 activationPolicy: app.activationPolicy,
@@ -104,9 +136,17 @@ final class MetadataResolver {
         return image
     }
 
+    /// `FileManager.displayName(atPath:)` hits the file system, and the history
+    /// rows ask for the same 25 bundle ids on every refresh, so the answer is
+    /// cached.  Only the resolved name is cached: the fallback belongs to the
+    /// caller's row, not to the bundle id.
     func displayName(bundleId: String?, fallback: String) -> String {
-        guard let bundleId, let url = applicationURL(bundleId: bundleId) else { return fallback }
-        return FileManager.default.displayName(atPath: url.path)
+        guard let bundleId else { return fallback }
+        if let cached = nameByBundle[bundleId] { return cached }
+        guard let url = applicationURL(bundleId: bundleId) else { return fallback }
+        let name = FileManager.default.displayName(atPath: url.path)
+        nameByBundle[bundleId] = name
+        return name
     }
 
     func applicationURL(bundleId: String) -> URL? {
@@ -116,12 +156,12 @@ final class MetadataResolver {
         return url
     }
 
-    /// Drops cache entries for keys that no longer exist.  Runs every 60 ticks
-    /// so a long session does not accumulate dead processes.
-    func pruneIfNeeded(live: Set<ProcessKey>) {
-        ticksSincePrune += 1
-        guard ticksSincePrune >= 60 else { return }
-        ticksSincePrune = 0
+    /// Drops cache entries for keys that no longer exist.  The caller schedules
+    /// this every 60 ticks; it does not throttle itself, so building the live
+    /// set is only paid on the ticks that actually prune.  The bundle-keyed
+    /// caches are deliberately not pruned: they are bounded by the number of
+    /// distinct applications seen in one session, which is small.
+    func prune(live: Set<ProcessKey>) {
         cache = cache.filter { live.contains($0.key) }
     }
 }

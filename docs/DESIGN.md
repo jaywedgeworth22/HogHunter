@@ -36,7 +36,7 @@ Sources/
   UI/Meters.swift                 CPU and Memory meters with captions and severity color
   UI/RowView.swift                row with context menu
   UI/SettingsView.swift           settings
-Tests/HogHunterTests/             XCTest: CpuMath, MemoryMath, Grouping, HistoryStore, HogFormat
+Tests/HogHunterTests/             XCTest: CpuMath, MemoryMath, Grouping, HistoryStore, HogFormat, AlertPolicy, MetadataResolver
 scripts/install.sh                build, sign, install to ~/Applications, relaunch
 .github/workflows/ci.yml          macOS runner: xcodegen + xcodebuild test
 HogHunter.entitlements            empty; Release has no get-task-allow and hardened runtime on
@@ -107,7 +107,7 @@ struct HogRow: Identifiable, Hashable {
 }
 ```
 
-`HogRow` equality ignores `icon`.  `HogFormat.cpu` prints one decimal below 100 and an integer at or above 100, and always the "%" suffix; `HogFormat.memory` prints integer MB below 1 GB and one-decimal GB above, binary units; `HogFormat.rate` prints "12 MB/s".
+`HogRow` equality compares every stored property except `icon`, which is a shared `NSImage` reference.  `HogFormat.cpu` prints one decimal below 100 and an integer at or above 100, and always the "%" suffix; `HogFormat.memory` prints integer MB below 1 GB and one-decimal GB above, binary units; `HogFormat.rate` prints "12 MB/s".
 
 ## Sampler contract
 
@@ -127,7 +127,9 @@ struct HogRow: Identifiable, Hashable {
 
 ## MetadataResolver contract (main actor)
 
-`func resolve(_ keys: [ProcessKey], samples: [ProcessKey: ProcessSample]) -> [ProcessKey: Metadata]` where `Metadata { displayName, bundleId, icon, activationPolicy, isRunningApplication }`.  Cache per `ProcessKey`; icons cached per bundle id or path; `NSWorkspace.shared.urlForApplication(withBundleIdentifier:)` cached per bundle id.  Called only for rows about to be displayed plus the top hog for the menu bar label.  Cache entries for vanished keys are dropped every 60 ticks.
+`func resolve(_ keys: [ProcessKey], samples: [ProcessKey: ProcessSample]) -> [ProcessKey: Metadata]` where `Metadata { displayName, bundleId, icon, activationPolicy, isRunningApplication }`.  Cache per `ProcessKey`; icons cached per bundle id or path; `NSWorkspace.shared.urlForApplication(withBundleIdentifier:)` and `FileManager.displayName(atPath:)` cached per bundle id.  Called only for rows about to be displayed, plus the top hog for the menu bar label and any process already above the alert threshold.  `prune(live:)` drops entries for vanished keys; the store calls it every 60 ticks and the resolver does not throttle itself.
+
+`refreshRunningApps()` runs every tick, but an `AppInfo` is built once per pid: enumerating `NSWorkspace.shared.runningApplications` is cheap while reading `bundleIdentifier`, `localizedName`, `activationPolicy` and `bundleURL` off ~250 apps costs 40-50 ms of main-thread time.  An entry whose bundle id, name or URL is still nil is not settled yet -- those publish asynchronously after a launch -- so it is read again next tick.  The enumeration is injected through `RunningApplicationInfo` so a test can prove the once-per-pid rule.
 
 ## Grouping contract (pure, tested)
 
@@ -141,7 +143,7 @@ struct HogRow: Identifiable, Hashable {
 
 `func quit(_ row: HogRow, force: Bool) -> QuitOutcome` where each member is checked in order: identity (current `ri_proc_start_abstime` equals the key's `startTime`, otherwise skipped as "changed since sampling"), ownership (`uid == getuid()`), denylist (`kernel_task`, `launchd`, `WindowServer`, `loginwindow`, `Finder`, `Dock`, `SystemUIServer`, `ControlCenter`, `NotificationCenter`, `coreaudiod`, and Hog Hunter itself), then action: `NSRunningApplication.terminate()` / `forceTerminate()` when the pid is a running application, else `kill(SIGTERM)` / `kill(SIGKILL)`.  Returns per-member results for the UI.  `canQuit` on a row is false when every member is blocked, and `quitBlockReason` explains why.
 
-Alert copy: title "Quit <name>?", message "Asks <name> to quit.  It may show a save prompt or refuse.  <N> processes are included." and for force "Force Quit ends <N> processes immediately.  Unsaved work is lost."  Buttons: Cancel (default), Quit, Force Quit (destructive).
+Alert copy: title "Quit <name>?", message "Asks <name> to quit.  It may show a save prompt or refuse.  <N> processes are included." and for force "Force Quit ends <N> processes immediately.  Unsaved work is lost."  Buttons: Cancel (Escape dismisses it; nothing is bound to Return, because an `NSButton` holds one key equivalent and Return-on-Cancel would take Escape's place), Quit, Force Quit (destructive).
 
 ## HistoryStore v2
 
@@ -154,8 +156,10 @@ CREATE TABLE samples (ts INTEGER NOT NULL, pid INTEGER NOT NULL, start INTEGER N
 CREATE INDEX samples_ts ON samples(ts);
 ```
 
+- The database is opened, migrated and first-pruned lazily, inside the lock, by whichever entry point is called first -- `HogStore` primes it on the sampling queue -- so a v1 upgrade's `DROP TABLE` never stalls the main actor while the menu bar item is being built.
 - On open, if `user_version < 2` the old `samples` table is dropped (it held at most 24 h of values that were 41.7x too small) and the v2 schema is created.
-- `record(ticks:)` inserts one `ticks` row and the union of the top 25 by CPU and the top 25 by footprint (`reason` bit 1 = CPU, bit 2 = memory), with `cpu` clamped to `[0, 100 * coreCount * 1.5]`.  Every `sqlite3_*` return code is checked; failures set `lastError`.
+- `record(ticks:)` deletes any `samples` rows already at this whole-second timestamp (last write wins, so two ticks inside one second cannot double that second's sums), then inserts one `ticks` row and the union of the top 25 by CPU and the top 25 by footprint (`reason` bit 1 = CPU, bit 2 = memory), with `cpu` clamped to `[0, 100 * coreCount * 1.5]`.  Every `sqlite3_open`, `sqlite3_exec`, `sqlite3_prepare_v2` and `sqlite3_step` return code is checked and failures set `lastError`; bind indices are static and every non-nullable column is `NOT NULL`, so a bind failure surfaces as a constraint error on step.
+- `lastError` is cleared at the start of `record` and of `aggregates` -- the first call of each batch the store makes (record then prune, aggregates then coverage) -- so a transient failure clears once the database works again while the second call in a batch can never erase the first one's error.  A failure to open is never cleared.
 - `aggregates(lookback:groupByApp:sort:)` sums per timestamp first, then divides by the window's tick count:
 
 ```sql
@@ -167,14 +171,16 @@ FROM per_ts, win GROUP BY k ORDER BY <avg_cpu | avg_mem> DESC LIMIT 40
 ```
 
   Results are memoized per `(lookback, groupByApp, sort, lastRecordedTs)` so the panel can rebuild every tick without re-running the query.
-- `coverage()` returns `(sampledSeconds: ticks * interval, firstTs)`; the coverage note says "Sampled 3h 12m of the last 24 h".
+- `coverage()` returns `(sampledSeconds: min(ticks * interval, lookback), firstTs)`; the coverage note says "Sampled 3h 12m of the last 24 h".  Ticks are valued at the current refresh interval, so the answer can be short after a cadence change, but the clamp keeps it from ever exceeding its own window.
 - `prune()` runs on open and every 20 minutes, deleting `samples` and `ticks` older than 24 h.
 
 ## HogStore
 
 - Owns the sampling queue.  `tick()` dispatches `sampler.snapshot()` to the queue, then hops to the main actor to resolve metadata for displayed rows, rebuild rows, update the label, evaluate alerts, and record history every 5th tick.  If a tick is still running when the timer fires, the fire is skipped.
 - Timer: interval from settings (2, 3 or 5 s, default 3), tolerance 0.5 s, added in `.common` run loop mode.
-- `panelVisible` (set by the panel's `onAppear` / `onDisappear`) gates metadata resolution beyond the top hog and history aggregation.
+- `panelVisible` (set by the panel's `onAppear` / `onDisappear`) gates history aggregation.  Metadata resolution is bounded by the row limit rather than by visibility: alerts, the menu bar label and history recording all need names with the panel closed, and the running-app table is memoized per pid, so the ungated cost is under 0.2 ms a tick.
+- A `@Published` `didSet` that rebuilds rows (`window`, `grouping`, `sort`) hops the rebuild to the next main-actor turn, because the `didSet` runs inside SwiftUI's own view update and reassigning `rows` there is "Publishing changes from within view updates is not allowed".
+- Memory-pressure transitions call `tick()` and re-arm the timer, and are ignored when a tick already ran inside the current refresh interval, so pressure flapping cannot multiply the sampling rate.
 - Persisted choices via `@AppStorage`: `window`, `grouping`, `sort`, `cpuScale`, `menuBarLabelMode` (`machinePercent` default, `topHogName`), `refreshInterval`, `alertsEnabled` (default off), `alertThresholdPercent` (per-core, default 300), `alertSustainedMinutes` (default 5), `appearance` (`light` default, `system`, `dark`).
 - `menuBarLabel`: machine percent by default; with `topHogName`, "<name> <cpu>" on the chosen scale.  Both carry a `help` string naming the scale.
 - `hasBaseline` false until the second snapshot; the panel shows "Measuring…" until then.  `isStale` true when `now - pulse.sampledAt > 3 * interval`.
@@ -182,7 +188,9 @@ FROM per_ts, win GROUP BY k ORDER BY <avg_cpu | avg_mem> DESC LIMIT 40
 
 ## Alerts
 
-`Alerts.evaluate(rows:, threshold:, sustained:, now:)` tracks first-exceeded time per row id, fires one `UNUserNotificationCenter` notification when a row has stayed above the per-core threshold for the sustained duration, then applies a 30 minute cooldown per id.  Authorization is requested when the setting is switched on; denial is shown next to the toggle.
+`Alerts.evaluate(candidates:, threshold:, sustained:, now:)` tracks first-exceeded time per row id, fires one `UNUserNotificationCenter` notification when a row has stayed above the per-core threshold for the sustained duration, then applies a 30 minute cooldown per id.  The candidate list is every process or app group at or above the threshold, built by `HogStore` from the whole snapshot -- never from the display list, whose Sort choice and 25-row limit would otherwise decide whether an alert can fire at all.  The cooldown expires by age rather than by visibility, so a row that leaves the candidate set and comes back cannot notify twice inside one cooldown.  The notification body names the scale it is measured on: "Chrome has used 412% of one core for 5 minutes."
+
+`Alerts` is the notification centre's delegate and answers `willPresent` with `[.banner, .list, .sound]`; without a delegate macOS silently drops any alert that arrives while Hog Hunter is frontmost, and the cooldown would still be spent.  Authorization is requested when the setting is switched on, and once at launch when it is already on, so the decision is settled long before a row can fire; denial is shown next to the toggle.
 
 ## Panel
 
@@ -190,7 +198,8 @@ FROM per_ts, win GROUP BY k ORDER BY <avg_cpu | avg_mem> DESC LIMIT 40
 - Meters: CPU ("42% of all 10 cores", color by severity) and Memory ("13.3 of 16 GB · 16.9 GB swapped · pressure warning", color by pressure).  Under them, the visible-versus-invisible caption and, when swapping, "swapping in 120 MB/s".
 - Controls: Window (Now, Past Hour, Past 24 Hours), Show (Apps, Processes), Sort (CPU, Memory).  Choices persist.
 - Rows: icon, name, detail, CPU and memory in tabular numerals, a Quit button only when `canQuit`, and a context menu: Copy PID, Reveal in Finder, Sample for 3 Seconds (writes to `~/Library/Logs/HogHunter/` and opens it), Open Activity Monitor.  History rows show "avg CPU · peak <mem> · seen <presence>%".
-- Footer: Launch at Login toggle with its error beside it, coverage note, and a one-line scale legend: "Rows: % of one core.  Header: % of all cores."
+- Footer: Launch at Login toggle with its own error beside it, coverage note, and a one-line scale legend: "Rows: % of one core.  Header: % of all cores."  Settings uses the same "Launch at Login" name, under a "Startup" section.
+- Errors are separated by source: `lastError` (a failed sample or quit) and `historyError` (the database) show in red under the meters, `lastNotice` (what a quit actually did, which is often not a failure) shows in secondary text, and `loginItemError` only ever appears beside the Launch at Login toggle.
 - Accessibility: every meter and icon carries a label and value.  Light is the default appearance; System and Dark are settings.
 
 ## Build, signing, install

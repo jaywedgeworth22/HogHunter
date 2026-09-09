@@ -33,8 +33,11 @@ enum Grouping {
         byPid.reserveCapacity(samples.count)
         for sample in samples { byPid[sample.key.pid] = sample }
 
-        var ordered: [String] = []
-        var built: [String: Group] = [:]
+        // An array plus an index, rather than a dictionary of structs: merging
+        // through `built[key]` would make `members` non-uniquely referenced and
+        // deep-copy the array on every member added.
+        var groups: [Group] = []
+        var index: [String: Int] = [:]
 
         for sample in samples {
             let owner = owningApp(of: sample, byPid: byPid, isRegularApp: isRegularApp)
@@ -56,16 +59,15 @@ enum Grouping {
                 isApp = false
             }
 
-            if var group = built[groupKey] {
-                group.members.append(sample)
-                group.cpuPercent += sample.cpuPercent
-                group.memoryBytes = group.memoryBytes &+ sample.footprintBytes
-                built[groupKey] = group
+            if let position = index[groupKey] {
+                groups[position].members.append(sample)
+                groups[position].cpuPercent += sample.cpuPercent
+                groups[position].memoryBytes = groups[position].memoryBytes &+ sample.footprintBytes
             } else {
-                ordered.append(groupKey)
                 let ownerSample = owner.flatMap { byPid[$0] }
                 let primary = ownerSample ?? sample
-                built[groupKey] = Group(
+                index[groupKey] = groups.count
+                groups.append(Group(
                     key: groupKey,
                     ownerPid: owner,
                     bundleId: owner.flatMap(bundleId) ?? bundleId(sample.key.pid),
@@ -75,24 +77,24 @@ enum Grouping {
                     cpuPercent: sample.cpuPercent,
                     memoryBytes: sample.footprintBytes,
                     isApp: isApp
-                )
+                ))
             }
         }
 
-        return ordered.compactMap { built[$0] }
+        return groups
     }
 
-    /// Nearest ancestor (or the process itself) that is a regular app.  Cycles
-    /// and self-parents are impossible to follow: every pid is visited once.
+    /// Nearest ancestor (or the process itself) that is a regular app.  The
+    /// depth cap is what bounds the walk, so a ppid cycle or a self-parent
+    /// simply runs out of depth and yields no owner.
     private static func owningApp(
         of sample: ProcessSample,
         byPid: [pid_t: ProcessSample],
         isRegularApp: (pid_t) -> Bool
     ) -> pid_t? {
         var pid = sample.key.pid
-        var visited = Set<pid_t>()
         var depth = 0
-        while pid > 1, depth < maxDepth, visited.insert(pid).inserted {
+        while pid > 1, depth < maxDepth {
             if isRegularApp(pid) { return pid }
             guard let parent = byPid[pid]?.ppid, parent > 1 else { return nil }
             pid = parent

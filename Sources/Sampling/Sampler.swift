@@ -40,7 +40,6 @@ final class Sampler: @unchecked Sendable {
         let coreCount = reading.coreCount
 
         var processes: [ProcessSample] = []
-        var seen = Set<ProcessKey>()
         var unreadable = 0
         var visibleCpu = 0.0
         var next: [ProcessKey: Previous] = [:]
@@ -59,7 +58,6 @@ final class Sampler: @unchecked Sendable {
 
             let startTime = rusage?.ri_proc_start_abstime ?? 0
             let key = ProcessKey(pid: pid, startTime: startTime)
-            seen.insert(key)
 
             let ticks: UInt64
             if let rusage {

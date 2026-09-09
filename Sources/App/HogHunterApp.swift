@@ -15,8 +15,9 @@ struct HogHunterApp: App {
                     .monospacedDigit()
             }
             .help(store.menuBarHelp)
+            .accessibilityElement(children: .ignore)
             .accessibilityLabel("Hog Hunter")
-            .accessibilityValue(store.menuBarHelp)
+            .accessibilityValue(store.menuBarAccessibilityValue)
         }
         .menuBarExtraStyle(.window)
 
