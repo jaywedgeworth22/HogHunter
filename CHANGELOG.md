@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.1.0 — Wed, Sep 10, 2026
+
 Sampling and data layer:
 
 - Fixed per-process CPU: `proc_taskinfo` and `proc_pid_rusage` ticks are mach absolute-time units and are now converted with `mach_timebase_info`, so a row matches Activity Monitor instead of reading 41.7x too small.
