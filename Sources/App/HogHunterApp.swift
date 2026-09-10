@@ -14,7 +14,16 @@ struct HogHunterApp: App {
                 Text(store.menuBarLabel)
                     .monospacedDigit()
             }
+            .help(store.menuBarHelp)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Hog Hunter")
+            .accessibilityValue(store.menuBarAccessibilityValue)
         }
         .menuBarExtraStyle(.window)
+
+        Settings {
+            SettingsView()
+                .environmentObject(store)
+        }
     }
 }

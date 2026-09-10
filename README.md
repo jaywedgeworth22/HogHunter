@@ -30,7 +30,7 @@ No LaunchAgent.  The app is the sampler.  Quitting it stops history.
 
 ## Tests and CI
 
-`HogHunterTests` is an XCTest target exercising the pure formatting logic (`HogFormat`).  Run it locally with:
+`HogHunterTests` is an XCTest target covering `CpuMath` and `MemoryMath` conversion math, process `Grouping`, `HistoryStore` aggregation and schema migration, `AlertPolicy` sustain and cooldown decisions, `MetadataResolver` caching, and `HogFormat` string formatting.  Run it locally with:
 
 ```bash
 xcodegen generate

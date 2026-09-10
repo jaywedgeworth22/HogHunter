@@ -1,0 +1,187 @@
+import Foundation
+import UserNotifications
+
+/// The decision half of alerting, with no notification machinery in it.
+///
+/// Feed it one `step` per candidate per tick.  It answers the only question
+/// that matters: should this row fire right now?  A row must stay above the
+/// threshold for `sustained` before it fires, dropping below resets that
+/// clock, and after a firing the same row is quiet for `cooldown`.
+struct AlertPolicy {
+    /// How long a row must stay above the threshold before it fires.
+    var sustained: TimeInterval
+    /// How long a row stays quiet after firing.
+    var cooldown: TimeInterval
+
+    /// When each row first went above the threshold and stayed there.
+    private var firstExceeded: [String: Date] = [:]
+    /// When each row last fired.  Kept across a drop below the threshold, and
+    /// across a row leaving the candidate set, so a row that flaps cannot
+    /// notify twice in one cooldown.
+    private var lastFired: [String: Date] = [:]
+
+    init(sustained: TimeInterval = 5 * 60, cooldown: TimeInterval = 30 * 60) {
+        self.sustained = sustained
+        self.cooldown = cooldown
+    }
+
+    /// True exactly on the tick where `id` earns a notification.
+    mutating func step(id: String, above: Bool, now: Date) -> Bool {
+        guard above else {
+            firstExceeded[id] = nil
+            return false
+        }
+        let start = firstExceeded[id] ?? now
+        firstExceeded[id] = start
+        guard now.timeIntervalSince(start) >= sustained else { return false }
+        if let last = lastFired[id], now.timeIntervalSince(last) < cooldown { return false }
+        lastFired[id] = now
+        return true
+    }
+
+    /// How long `id` has been above the threshold, or 0 when it is not.
+    func timeAboveThreshold(id: String, now: Date) -> TimeInterval {
+        guard let start = firstExceeded[id] else { return 0 }
+        return max(0, now.timeIntervalSince(start))
+    }
+
+    /// Every id the policy is still tracking.  Only the tests read this; it
+    /// exists so the memory bound can be pinned.
+    var trackedIds: Set<String> {
+        Set(firstExceeded.keys).union(lastFired.keys)
+    }
+
+    /// Forgets rows the caller no longer considers, so a long session does not
+    /// grow a dictionary entry per process it ever saw.  The sustained clock is
+    /// dropped with the row -- restarting it only ever delays a notification --
+    /// but `lastFired` expires by age instead, so a row that leaves the
+    /// candidate set and comes back cannot notify twice inside one cooldown.
+    mutating func forgetAll(except live: Set<String>, now: Date) {
+        firstExceeded = firstExceeded.filter { live.contains($0.key) }
+        lastFired = lastFired.filter { live.contains($0.key) || now.timeIntervalSince($0.value) < cooldown }
+    }
+}
+
+/// Turns sustained CPU into one notification, and nothing else.
+@MainActor
+final class Alerts: NSObject, ObservableObject, UNUserNotificationCenterDelegate {
+    /// One row the policy is allowed to consider.  Deliberately not a `HogRow`:
+    /// the candidate set is the whole above-threshold list, not the truncated,
+    /// user-sorted set of rows the panel happens to be drawing.
+    struct Candidate {
+        var id: String
+        var name: String
+        /// Per-core scale, the same scale as `alertThresholdPercent`.
+        var cpuPercent: Double
+    }
+
+    /// True once the user has said no.  Settings shows it next to the toggle.
+    @Published private(set) var authorizationDenied = false
+    /// The last thing the notification centre refused to do, if anything.
+    @Published private(set) var lastError: String?
+
+    private var policy = AlertPolicy()
+    private var didRequestAuthorization = false
+
+    /// Nil when there is no bundle to notify from, which is the case in unit
+    /// tests and in any unbundled run.  Asking for the centre in that state
+    /// traps, so it is never asked.  The delegate is set here, behind the same
+    /// guard: without one, macOS drops any notification that arrives while Hog
+    /// Hunter is the active app, and the cooldown would still be spent.
+    private lazy var center: UNUserNotificationCenter? = {
+        guard Bundle.main.bundleIdentifier != nil else { return nil }
+        let center = UNUserNotificationCenter.current()
+        center.delegate = self
+        return center
+    }()
+
+    /// Shows the banner even when Settings or the panel is key.  Touches no
+    /// instance state, so it is safe to leave off the main actor -- which it
+    /// must be, because the protocol itself is not main-actor isolated.
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        completionHandler([.banner, .list, .sound])
+    }
+
+    /// Called when the setting is switched on, and once at launch when it is
+    /// already on, so the decision is settled long before a row can fire.
+    func requestAuthorization(completion: ((Bool) -> Void)? = nil) {
+        guard let center else {
+            authorizationDenied = true
+            completion?(false)
+            return
+        }
+        didRequestAuthorization = true
+        center.requestAuthorization(options: [.alert, .sound]) { granted, error in
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.authorizationDenied = !granted
+                if let error { self.lastError = error.localizedDescription }
+                completion?(granted)
+            }
+        }
+    }
+
+    /// One pass over the candidates the store handed in.  Everything at or
+    /// above the threshold is here, whatever the panel is showing, so Sort and
+    /// the 25-row display limit cannot silently switch alerting off.  The
+    /// store pre-filters `candidates` to those already at or above
+    /// `threshold`, so the `above == false` path below is normally dead code
+    /// here -- it exists to serve a caller that passes unfiltered rows, for
+    /// which it correctly resets the sustained clock instead of notifying.
+    func evaluate(
+        candidates: [Candidate],
+        threshold: Double,
+        sustained: TimeInterval,
+        now: Date = Date()
+    ) {
+        policy.sustained = max(1, sustained)
+        var live: Set<String> = []
+        live.reserveCapacity(candidates.count)
+        for candidate in candidates {
+            live.insert(candidate.id)
+            let above = candidate.cpuPercent >= threshold
+            let elapsed = above ? policy.timeAboveThreshold(id: candidate.id, now: now) : 0
+            guard policy.step(id: candidate.id, above: above, now: now) else { continue }
+            notify(candidate: candidate, seconds: max(elapsed, policy.sustained))
+        }
+        policy.forgetAll(except: live, now: now)
+    }
+
+    /// "Chrome has used 412% of one core for 5 minutes."  The threshold is set
+    /// on the per-core scale, so the notification names that scale rather than
+    /// converting to whatever the rows are showing.
+    static func message(name: String, cpuPercent: Double, seconds: TimeInterval) -> String {
+        let minutes = max(1, Int((seconds / 60).rounded()))
+        let unit = minutes == 1 ? "minute" : "minutes"
+        return "\(name) has used \(HogFormat.cpu(cpuPercent)) of one core for \(minutes) \(unit)."
+    }
+
+    private func notify(candidate: Candidate, seconds: TimeInterval) {
+        guard let center else { return }
+        if !didRequestAuthorization { requestAuthorization() }
+        let content = UNMutableNotificationContent()
+        content.title = "Hog Hunter"
+        content.body = Self.message(name: candidate.name, cpuPercent: candidate.cpuPercent, seconds: seconds)
+        content.sound = .default
+        let request = UNNotificationRequest(
+            identifier: "hog-\(candidate.id)-\(Int(Date().timeIntervalSince1970))",
+            content: content,
+            trigger: nil
+        )
+        center.add(request) { error in
+            guard let error else { return }
+            DispatchQueue.main.async { [weak self] in
+                self?.lastError = error.localizedDescription
+            }
+        }
+    }
+}
+
+/// So `Alerts.AlertPolicy` resolves as well as the top-level name.
+extension Alerts {
+    typealias AlertPolicy = HogHunter.AlertPolicy
+}
