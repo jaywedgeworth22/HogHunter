@@ -46,10 +46,16 @@ Fixes from the 1.1 review:
 - Memory-pressure transitions no longer add sampling passes on top of the timer; a pressure tick re-arms the timer instead, capping the rate at one pass per refresh interval.
 - `stop()` now also cancels the memory-pressure source, `HogRow` equality compares every field except the icon, grouping no longer deep-copies a group's member list on every merge, and the `sample` child process no longer writes into a pipe nobody drains.
 - Settings calls the login item "Launch at Login", the same name the panel and the coverage note use.
+- Quitting a row that acted on nothing -- everything blocked, changed since sampling, or otherwise failed -- is now reported as an error instead of a neutral notice.
+- The running-application table now periodically re-reads every app's activation policy instead of trusting the memo forever, so an app promoted from accessory to regular (or back) is picked up without restarting Hog Hunter.
+- The menu bar's busiest-app label is now computed from the full snapshot instead of the panel's own display list: with Sort set to Memory, a high-CPU, low-memory process could previously fall outside the panel's top 25 and be missed entirely.
+- A process whose owning app was still launching no longer keeps that half-published name (often just its pid) for the rest of the session; the cached entry is replaced once the app finishes publishing itself.
+- A process this user is not permitted to read CPU or memory for, but that still exists, is now counted toward the unreadable-process count instead of silently vanishing from it.
+- A history tick that fails partway through recording now rolls back instead of committing a partial row, so a tick with no matching samples (or samples with no tick) can no longer sit permanently in the database.
 
 Infrastructure additions (build, test, and release plumbing; no app behavior changed):
 
-- Added a `HogHunterTests` XCTest target (`Tests/HogHunterTests/`) and a `HogHunter` scheme that builds and runs it, covering `CpuMath` and `MemoryMath` conversion math, `Grouping`, `HistoryStore` aggregation, coverage, same-second ticks, error reporting and the v1-to-v2 migration, `AlertPolicy` sustain, cooldown and flapping behaviour, `MetadataResolver` caching, and `HogFormat` formatting.
+- Added a `HogHunterTests` XCTest target (`Tests/HogHunterTests/`) and a `HogHunter` scheme that builds and runs it, covering `CpuMath` and `MemoryMath` conversion math, `Grouping`, `HistoryStore` aggregation, coverage, same-second ticks, error reporting and the v1-to-v2 migration, `AlertPolicy` sustain, cooldown and flapping behaviour, `MetadataResolver` caching, `HogFormat` formatting, and the alert candidate selection lifted into a pure, testable function.
 - Added `HogHunter.entitlements` (empty) and turned on `ENABLE_HARDENED_RUNTIME` for Release builds, with `CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO` so Release binaries carry no `get-task-allow` entitlement.
 - Added `.github/workflows/ci.yml`: runs `xcodegen generate` and `xcodebuild test` on macOS for every push to `main` and every pull request.
 - Added `scripts/install.sh`: builds Release, signs with the "Developer ID Application" identity when available (adhoc fallback otherwise), verifies the signature, quits and replaces the running install in `~/Applications`, and relaunches.  Supports `--adhoc`, `--no-launch`, and `--dry-run`.

@@ -52,7 +52,11 @@ final class Sampler: @unchecked Sendable {
             guard rusage != nil || task != nil else {
                 // A pid that vanished between the listing and the read is not
                 // a permission problem, so it is not counted as unreadable.
-                if bsd == nil, pidExists(pid) { unreadable += 1 }
+                // `bsd` succeeding already proves the process still exists --
+                // both metric reads failing on a live process is exactly the
+                // EPERM case this count exists for -- so only fall back to
+                // the separate existence check when `bsd` did not.
+                if bsd != nil || pidExists(pid) { unreadable += 1 }
                 continue
             }
 

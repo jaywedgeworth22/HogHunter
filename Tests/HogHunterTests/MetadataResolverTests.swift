@@ -143,4 +143,31 @@ final class MetadataResolverTests: XCTestCase {
         let rebuilt = resolver.resolve([key], samples: [key: sample(pid: 900, start: 7, name: "second")])
         XCTAssertEqual(rebuilt[key]?.displayName, "second", "pruning really drops the entry")
     }
+
+    @MainActor
+    func testAProvisionalEntryIsReplacedAfterTheAppSettles() {
+        // Launching, so `runningApps` holds an unsettled AppInfo (nil bundle
+        // id, name and URL) the first time this key is resolved.
+        let key = ProcessKey(pid: 777, startTime: 3)
+        var running: [RunningApplicationInfo] = [
+            FakeRunningApp(pid: 777, bundleId: nil, name: nil, policy: .prohibited, url: nil),
+        ]
+        let resolver = MetadataResolver(runningApplications: { running })
+        resolver.refreshRunningApps()
+
+        let samples = [key: sample(pid: 777, start: 3, name: "Fallback")]
+        let provisional = resolver.resolve([key], samples: samples)
+        XCTAssertEqual(provisional[key]?.displayName, "Fallback", "an unsettled app falls back to the process name")
+
+        // The app finishes publishing itself.
+        running = [app(pid: 777)]
+        resolver.refreshRunningApps()
+
+        let settled = resolver.resolve([key], samples: samples)
+        XCTAssertEqual(
+            settled[key]?.displayName,
+            "Editor",
+            "a provisional entry must not be served from the cache once the app has settled"
+        )
+    }
 }

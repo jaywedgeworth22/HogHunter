@@ -95,6 +95,11 @@ final class HogStore: ObservableObject {
     private var liveRows: [HogRow] = []
     private var historyRows: [HogRow] = []
     private var coverage = HistoryStore.Coverage(tickCount: 0, sampledSeconds: 0, firstTimestamp: nil)
+    /// The full, untruncated snapshot from the last tick -- not display-sorted
+    /// or cut to 25 -- so `menuBarTopHog` can find the true busiest row even
+    /// when it would not have made the panel's own list.
+    private var lastProcesses: [ProcessSample] = []
+    private var lastGroups: [Grouping.Group] = []
 
     /// History is written every fifth tick, so one history tick covers five
     /// refresh intervals.
@@ -172,8 +177,13 @@ final class HogStore: ObservableObject {
             Task { @MainActor in
                 guard let self else { return }
                 guard Date().timeIntervalSince(self.lastTickAt) >= self.refreshInterval else { return }
-                self.tick()
-                self.restartTimer()
+                // `tick()` no-ops when a sample is already in flight, in which
+                // case the timer that would otherwise fire on schedule must be
+                // left alone -- restarting it here would delay that pending
+                // tick for no reason.
+                if self.tick() {
+                    self.restartTimer()
+                }
             }
         }
         source.resume()
@@ -182,8 +192,11 @@ final class HogStore: ObservableObject {
 
     // MARK: - Sampling
 
-    func tick() {
-        guard !isSampling else { return }
+    /// Starts a sample, or returns `false` without doing anything when one is
+    /// already in flight.
+    @discardableResult
+    func tick() -> Bool {
+        guard !isSampling else { return false }
         lastTickAt = Date()
         isSampling = true
         let sampler = self.sampler
@@ -193,6 +206,7 @@ final class HogStore: ObservableObject {
                 self?.apply(snapshot)
             }
         }
+        return true
     }
 
     private func apply(_ snapshot: Snapshot) {
@@ -203,7 +217,10 @@ final class HogStore: ObservableObject {
         isStale = false
 
         samples = Dictionary(uniqueKeysWithValues: snapshot.processes.map { ($0.key, $0) })
-        resolver.refreshRunningApps()
+        // Every 20th tick, re-read every running app's activationPolicy instead
+        // of trusting the memo -- an app can be promoted from accessory to
+        // regular (or back) well after it first settles.
+        resolver.refreshRunningApps(force: tickIndex % 20 == 0)
         let groups = Grouping.groups(
             snapshot.processes,
             isRegularApp: { [resolver] pid in resolver.isRegularApp(pid) },
@@ -215,6 +232,8 @@ final class HogStore: ObservableObject {
             for member in group.members { groupKeyByProcess[member.key] = group.key }
         }
 
+        lastProcesses = snapshot.processes
+        lastGroups = groups
         liveRows = buildLiveRows(snapshot.processes, groups: groups)
         if window == .now { rows = liveRows }
 
@@ -268,8 +287,10 @@ final class HogStore: ObservableObject {
     }
 
     /// The member whose metadata stands for the whole group: its owner when
-    /// there is one, otherwise its largest process.
-    private func anchorKey(_ group: Grouping.Group) -> ProcessKey {
+    /// there is one, otherwise its largest process.  Static and `nonisolated`:
+    /// it only reads the group handed to it, never store state, and is called
+    /// from the `nonisolated` `alertCandidates(processes:groups:...)` below.
+    private nonisolated static func anchorKey(_ group: Grouping.Group) -> ProcessKey {
         if let owner = group.ownerPid,
            let sample = group.members.first(where: { $0.key.pid == owner }) {
             return sample.key
@@ -279,39 +300,86 @@ final class HogStore: ObservableObject {
 
     // MARK: - Alerts
 
+    /// One hog worth alerting on, selected but not yet named: `candidate.name`
+    /// is a fallback (the raw process or group name) and `resolveKey` is the
+    /// key the caller should resolve display metadata for, if it wants a
+    /// nicer name than the fallback.
+    struct AlertCandidateSelection {
+        var candidate: Alerts.Candidate
+        var resolveKey: ProcessKey
+    }
+
     /// Everything at or above the alert threshold, whatever the panel is
     /// showing.  Alerting must not depend on the display list: with Sort set to
     /// Memory, a process burning six cores can sit far outside the 25 largest
     /// memory consumers and would never be considered at all.  Filtering by the
     /// threshold first keeps this cheap -- the set is bounded by total CPU
     /// divided by the threshold, so it is normally empty.
+    ///
+    /// Pure: no store state and no metadata resolution, so it is exercised
+    /// directly by `AlertCandidatesTests` without a `HogStore` in sight, and
+    /// `nonisolated` so those tests can call it without hopping to the main
+    /// actor.  The instance-level `alertCandidates(_:groups:)` below is a
+    /// thin wrapper that resolves display names afterwards.
+    nonisolated static func alertCandidates(
+        processes: [ProcessSample],
+        groups: [Grouping.Group],
+        grouping: HogGrouping,
+        threshold: Double,
+        processRowId: (ProcessKey) -> String,
+        groupRowId: (String) -> String
+    ) -> [AlertCandidateSelection] {
+        if grouping == .processes {
+            return processes
+                .filter { $0.cpuPercent >= threshold }
+                .map { process in
+                    AlertCandidateSelection(
+                        candidate: Alerts.Candidate(
+                            id: processRowId(process.key),
+                            name: process.name,
+                            cpuPercent: process.cpuPercent
+                        ),
+                        resolveKey: process.key
+                    )
+                }
+        }
+        return groups
+            .filter { $0.cpuPercent >= threshold }
+            .map { group in
+                let anchor = anchorKey(group)
+                return AlertCandidateSelection(
+                    candidate: Alerts.Candidate(
+                        id: groupRowId(group.key),
+                        name: group.name,
+                        cpuPercent: group.cpuPercent
+                    ),
+                    resolveKey: anchor
+                )
+            }
+    }
+
+    /// Resolves the pure selection above into candidates with real display
+    /// names, touching the resolver only for the keys actually selected.
     private func alertCandidates(
         _ processes: [ProcessSample],
         groups: [Grouping.Group]
     ) -> [Alerts.Candidate] {
-        let threshold = alertThresholdPercent
-        if grouping == .processes {
-            let above = processes.filter { $0.cpuPercent >= threshold }
-            guard !above.isEmpty else { return [] }
-            let metadata = resolver.resolve(above.map(\.key), samples: samples)
-            return above.map { process in
-                Alerts.Candidate(
-                    id: Self.processRowId(process.key),
-                    name: metadata[process.key]?.displayName ?? process.name,
-                    cpuPercent: process.cpuPercent
-                )
+        let selections = Self.alertCandidates(
+            processes: processes,
+            groups: groups,
+            grouping: grouping,
+            threshold: alertThresholdPercent,
+            processRowId: { Self.processRowId($0) },
+            groupRowId: { Self.groupRowId($0) }
+        )
+        guard !selections.isEmpty else { return [] }
+        let metadata = resolver.resolve(selections.map(\.resolveKey), samples: samples)
+        return selections.map { selection in
+            var candidate = selection.candidate
+            if let name = metadata[selection.resolveKey]?.displayName {
+                candidate.name = name
             }
-        }
-        let above = groups.filter { $0.cpuPercent >= threshold }
-        guard !above.isEmpty else { return [] }
-        let anchors = above.map(anchorKey)
-        let metadata = resolver.resolve(anchors, samples: samples)
-        return zip(above, anchors).map { group, anchor in
-            Alerts.Candidate(
-                id: Self.groupRowId(group.key),
-                name: metadata[anchor]?.displayName ?? group.name,
-                cpuPercent: group.cpuPercent
-            )
+            return candidate
         }
     }
 
@@ -344,7 +412,7 @@ final class HogStore: ObservableObject {
         }
 
         let ranked = groups.sorted(by: groupOrder).prefix(Self.rowLimit)
-        let anchors = ranked.map(anchorKey)
+        let anchors = ranked.map(Self.anchorKey)
         let metadata = resolver.resolve(anchors, samples: samples)
 
         return zip(ranked, anchors).map { group, anchor in
@@ -414,6 +482,9 @@ final class HogStore: ObservableObject {
 
     private func choiceChanged() {
         if window == .now {
+            // A history error from Past Hour must not linger once the user is
+            // back looking at live rows.
+            historyError = nil
             rows = liveRows
         } else {
             rows = historyRows
@@ -523,13 +594,38 @@ final class HogStore: ObservableObject {
         return "Sampled \(HogFormat.duration(coverage.sampledSeconds)) of the last \(windowLabel)."
     }
 
-    /// The row the menu bar would name, or nil when nothing is busy enough --
+    /// A process or app's name and CPU, resolved just for the menu bar label.
+    /// Deliberately not a `HogRow`: the menu bar only ever reads these two
+    /// fields, so there is no reason to build a whole row -- with its icon,
+    /// quit eligibility and the rest -- just to name the busiest one.
+    private struct TopHog {
+        var name: String
+        var cpuPercent: Double
+    }
+
+    /// The busiest process or app, or nil when nothing is busy enough --
     /// including before the first two samples, when every row still reads 0%.
-    private var menuBarTopHog: HogRow? {
-        guard let top = liveRows.max(by: { $0.cpuPercent < $1.cpuPercent }), top.cpuPercent >= 1 else {
+    ///
+    /// Computed from the last full snapshot (`lastProcesses` / `lastGroups`),
+    /// not from `liveRows`: `liveRows` is sorted by the user's chosen Sort and
+    /// truncated to 25, so with Sort set to Memory a process burning six cores
+    /// but holding little memory could sit outside that list and the menu bar
+    /// would silently miss it.  Only the winning key's name is resolved, the
+    /// same one-key call `resolve` already supports for exactly this reason.
+    private var menuBarTopHog: TopHog? {
+        if grouping == .processes {
+            guard let top = lastProcesses.max(by: { $0.cpuPercent < $1.cpuPercent }), top.cpuPercent >= 1 else {
+                return nil
+            }
+            let name = resolver.resolve([top.key], samples: samples)[top.key]?.displayName ?? top.name
+            return TopHog(name: name, cpuPercent: top.cpuPercent)
+        }
+        guard let top = lastGroups.max(by: { $0.cpuPercent < $1.cpuPercent }), top.cpuPercent >= 1 else {
             return nil
         }
-        return top
+        let anchor = Self.anchorKey(top)
+        let name = resolver.resolve([anchor], samples: samples)[anchor]?.displayName ?? top.name
+        return TopHog(name: name, cpuPercent: top.cpuPercent)
     }
 
     private var machinePercentLabel: String {
@@ -601,7 +697,14 @@ final class HogStore: ObservableObject {
         let outcome = ProcessControl.quit(row, force: force)
         // Often not a failure at all -- "Quit 1, skipped Safari is a system
         // process." is a summary -- so it does not go in the red channel.
-        lastNotice = outcome.message
+        // But a quit that acted on nothing (everything blocked, changed, or
+        // failed -- including the history-row case where there was nothing
+        // live to act on at all) is a failure, and belongs in the red channel.
+        if outcome.actedOn == 0 {
+            lastError = outcome.message
+        } else {
+            lastNotice = outcome.message
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             self?.tick()
         }

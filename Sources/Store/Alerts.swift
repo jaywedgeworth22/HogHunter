@@ -127,7 +127,11 @@ final class Alerts: NSObject, ObservableObject, UNUserNotificationCenterDelegate
 
     /// One pass over the candidates the store handed in.  Everything at or
     /// above the threshold is here, whatever the panel is showing, so Sort and
-    /// the 25-row display limit cannot silently switch alerting off.
+    /// the 25-row display limit cannot silently switch alerting off.  The
+    /// store pre-filters `candidates` to those already at or above
+    /// `threshold`, so the `above == false` path below is normally dead code
+    /// here -- it exists to serve a caller that passes unfiltered rows, for
+    /// which it correctly resets the sustained clock instead of notifying.
     func evaluate(
         candidates: [Candidate],
         threshold: Double,

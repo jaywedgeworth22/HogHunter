@@ -58,6 +58,13 @@ final class HistoryStore: @unchecked Sendable {
     private let path: String
     private var db: OpaquePointer?
     private var didOpen = false
+    /// Set once, inside `openLocked`, the moment the open sequence -- the
+    /// `sqlite3_open` call, either pragma, or the migration -- hits a
+    /// failure.  `openLocked` leaves `db` non-nil even when a pragma or the
+    /// migration fails, so `record` and `aggregates` cannot tell a healthy
+    /// connection from one that opened with an error just by checking `db`;
+    /// they consult this flag instead before clearing `lastError`.
+    private var openFailed = false
     private let lock = NSLock()
     private var memo: [MemoKey: [Aggregate]] = [:]
     private var lastRecordedTs: Int64 = 0
@@ -116,29 +123,37 @@ final class HistoryStore: @unchecked Sendable {
         var handle: OpaquePointer?
         guard sqlite3_open(path, &handle) == SQLITE_OK else {
             lastError = "Could not open the history database."
+            openFailed = true
             if let handle { sqlite3_close(handle) }
             return
         }
         db = handle
-        exec("PRAGMA journal_mode=WAL;", label: "journal mode")
-        exec("PRAGMA synchronous=NORMAL;", label: "synchronous")
-        migrate()
+        if !exec("PRAGMA journal_mode=WAL;", label: "journal mode") { openFailed = true }
+        if !exec("PRAGMA synchronous=NORMAL;", label: "synchronous") { openFailed = true }
+        if !migrate() { openFailed = true }
         pruneLocked()
     }
 
     // MARK: - Schema
 
-    private func migrate() {
-        guard db != nil else { return }
+    @discardableResult
+    private func migrate() -> Bool {
+        guard db != nil else { return false }
+        var ok = true
         // A failed read must not be taken for version 0: that would drop a
         // perfectly good v2 `samples` table.
-        if let version = scalarInt("PRAGMA user_version"), version < 2 {
-            // v1 stored raw mach ticks read as nanoseconds, so every CPU value
-            // in it was 41.7x too small.  There is nothing worth migrating.
-            exec("DROP TABLE IF EXISTS samples;", label: "drop v1 samples")
-            exec("DROP INDEX IF EXISTS samples_ts;", label: "drop v1 index")
+        if let version = scalarInt("PRAGMA user_version") {
+            if version < 2 {
+                // v1 stored raw mach ticks read as nanoseconds, so every CPU
+                // value in it was 41.7x too small.  There is nothing worth
+                // migrating.
+                if !exec("DROP TABLE IF EXISTS samples;", label: "drop v1 samples") { ok = false }
+                if !exec("DROP INDEX IF EXISTS samples_ts;", label: "drop v1 index") { ok = false }
+            }
+        } else {
+            ok = false
         }
-        exec(
+        if !exec(
             """
             CREATE TABLE IF NOT EXISTS ticks (ts INTEGER PRIMARY KEY);
             CREATE TABLE IF NOT EXISTS samples (
@@ -156,8 +171,11 @@ final class HistoryStore: @unchecked Sendable {
             CREATE INDEX IF NOT EXISTS samples_ts ON samples(ts);
             """,
             label: "create v2 schema"
-        )
-        exec("PRAGMA user_version=2;", label: "set user version")
+        ) {
+            ok = false
+        }
+        if !exec("PRAGMA user_version=2;", label: "set user version") { ok = false }
+        return ok
     }
 
     // MARK: - Recording
@@ -175,7 +193,7 @@ final class HistoryStore: @unchecked Sendable {
         defer { lock.unlock() }
         openLocked()
         guard let db else { return }
-        lastError = nil
+        if !openFailed { lastError = nil }
 
         let ceiling = CpuMath.ceiling(coreCount: coreCount)
         let byCpu = samples.sorted { $0.cpuPercent > $1.cpuPercent }.prefix(25)
@@ -195,6 +213,12 @@ final class HistoryStore: @unchecked Sendable {
         let ts = Int64(date.timeIntervalSince1970)
         guard check(sqlite3_exec(db, "BEGIN", nil, nil, nil), "begin") else { return }
 
+        // Tracks the first failed statement in this transaction.  A failure
+        // here must not be silently committed -- a tick row with no sample
+        // rows (or vice versa) would corrupt the average forever, since
+        // nothing ever revisits an old timestamp.
+        var failed = false
+
         // `ts` is a whole second and `ticks` is keyed on it, so two ticks inside
         // one second would leave one tick row and two sets of sample rows --
         // doubling that second's sums while the divisor stayed at one.  Last
@@ -202,44 +226,67 @@ final class HistoryStore: @unchecked Sendable {
         var replaceStatement: OpaquePointer?
         if check(sqlite3_prepare_v2(db, "DELETE FROM samples WHERE ts = ?", -1, &replaceStatement, nil), "prepare replace") {
             sqlite3_bind_int64(replaceStatement, 1, ts)
-            _ = check(sqlite3_step(replaceStatement), "replace tick", expected: SQLITE_DONE)
+            if !check(sqlite3_step(replaceStatement), "replace tick", expected: SQLITE_DONE) { failed = true }
+        } else {
+            failed = true
         }
         sqlite3_finalize(replaceStatement)
 
-        var tickStatement: OpaquePointer?
-        if check(sqlite3_prepare_v2(db, "INSERT OR IGNORE INTO ticks(ts) VALUES(?)", -1, &tickStatement, nil), "prepare tick") {
-            sqlite3_bind_int64(tickStatement, 1, ts)
-            _ = check(sqlite3_step(tickStatement), "insert tick", expected: SQLITE_DONE)
-        }
-        sqlite3_finalize(tickStatement)
-
-        var statement: OpaquePointer?
-        let sql = """
-        INSERT INTO samples(ts,pid,start,key,group_key,name,bundle,cpu,mem,reason)
-        VALUES(?,?,?,?,?,?,?,?,?,?)
-        """
-        if check(sqlite3_prepare_v2(db, sql, -1, &statement, nil), "prepare sample") {
-            for (identity, sample) in chosen {
-                sqlite3_reset(statement)
-                sqlite3_clear_bindings(statement)
-                sqlite3_bind_int64(statement, 1, ts)
-                sqlite3_bind_int(statement, 2, identity.pid)
-                sqlite3_bind_int64(statement, 3, Int64(bitPattern: identity.startTime))
-                sqlite3_bind_text(statement, 4, "\(identity.pid)-\(identity.startTime)", -1, sqliteTransient)
-                sqlite3_bind_text(statement, 5, groupKey(sample), -1, sqliteTransient)
-                sqlite3_bind_text(statement, 6, sample.name, -1, sqliteTransient)
-                if let bundle = bundleId(sample) {
-                    sqlite3_bind_text(statement, 7, bundle, -1, sqliteTransient)
-                } else {
-                    sqlite3_bind_null(statement, 7)
-                }
-                sqlite3_bind_double(statement, 8, min(max(0, sample.cpuPercent), ceiling))
-                sqlite3_bind_int64(statement, 9, Int64(bitPattern: sample.footprintBytes))
-                sqlite3_bind_int(statement, 10, Int32(reasons[identity] ?? 0))
-                _ = check(sqlite3_step(statement), "insert sample", expected: SQLITE_DONE)
+        if !failed {
+            var tickStatement: OpaquePointer?
+            if check(sqlite3_prepare_v2(db, "INSERT OR IGNORE INTO ticks(ts) VALUES(?)", -1, &tickStatement, nil), "prepare tick") {
+                sqlite3_bind_int64(tickStatement, 1, ts)
+                if !check(sqlite3_step(tickStatement), "insert tick", expected: SQLITE_DONE) { failed = true }
+            } else {
+                failed = true
             }
+            sqlite3_finalize(tickStatement)
         }
-        sqlite3_finalize(statement)
+
+        if !failed {
+            var statement: OpaquePointer?
+            let sql = """
+            INSERT INTO samples(ts,pid,start,key,group_key,name,bundle,cpu,mem,reason)
+            VALUES(?,?,?,?,?,?,?,?,?,?)
+            """
+            if check(sqlite3_prepare_v2(db, sql, -1, &statement, nil), "prepare sample") {
+                for (identity, sample) in chosen {
+                    guard !failed else { break }
+                    sqlite3_reset(statement)
+                    sqlite3_clear_bindings(statement)
+                    sqlite3_bind_int64(statement, 1, ts)
+                    sqlite3_bind_int(statement, 2, identity.pid)
+                    sqlite3_bind_int64(statement, 3, Int64(bitPattern: identity.startTime))
+                    sqlite3_bind_text(statement, 4, "\(identity.pid)-\(identity.startTime)", -1, sqliteTransient)
+                    sqlite3_bind_text(statement, 5, groupKey(sample), -1, sqliteTransient)
+                    sqlite3_bind_text(statement, 6, sample.name, -1, sqliteTransient)
+                    if let bundle = bundleId(sample) {
+                        sqlite3_bind_text(statement, 7, bundle, -1, sqliteTransient)
+                    } else {
+                        sqlite3_bind_null(statement, 7)
+                    }
+                    sqlite3_bind_double(statement, 8, min(max(0, sample.cpuPercent), ceiling))
+                    sqlite3_bind_int64(statement, 9, Int64(bitPattern: sample.footprintBytes))
+                    sqlite3_bind_int(statement, 10, Int32(reasons[identity] ?? 0))
+                    if !check(sqlite3_step(statement), "insert sample", expected: SQLITE_DONE) { failed = true }
+                }
+            } else {
+                failed = true
+            }
+            sqlite3_finalize(statement)
+        }
+
+        guard !failed else {
+            let cause = lastError
+            // A failed `BEGIN` never opened a transaction, so rolling back
+            // then would discard nothing and only overwrite `cause` with a
+            // spurious "cannot rollback" error.
+            if sqlite3_get_autocommit(db) == 0 {
+                _ = check(sqlite3_exec(db, "ROLLBACK", nil, nil, nil), "rollback")
+            }
+            lastError = cause ?? lastError ?? "History record failed."
+            return
+        }
         _ = check(sqlite3_exec(db, "COMMIT", nil, nil, nil), "commit")
         lastRecordedTs = ts
     }
@@ -253,7 +300,7 @@ final class HistoryStore: @unchecked Sendable {
         defer { lock.unlock() }
         openLocked()
         guard let db else { return [] }
-        lastError = nil
+        if !openFailed { lastError = nil }
 
         let memoKey = MemoKey(lookback: lookback, groupByApp: groupByApp, sort: sort, lastTs: lastRecordedTs)
         if let cached = memo[memoKey] { return cached }

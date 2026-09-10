@@ -241,13 +241,11 @@ final class HistoryStoreTests: XCTestCase {
     }
 
     func testLastErrorClearsOnceQueriesWorkAgain() throws {
-        let scratchDir = URL(
-            fileURLWithPath: "/private/tmp/claude-501/-Users-jay-Code-HogHunter/da3e5df1-ebc2-4be9-8c4e-126b394e8ab3/scratchpad/impl-tests",
-            isDirectory: true
-        )
+        let scratchDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HogHunterTests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: scratchDir, withIntermediateDirectories: true)
-        let dbURL = scratchDir.appendingPathComponent("recovery-\(UUID().uuidString).sqlite")
-        defer { for suffix in ["", "-wal", "-shm"] { try? FileManager.default.removeItem(atPath: dbURL.path + suffix) } }
+        defer { try? FileManager.default.removeItem(at: scratchDir) }
+        let dbURL = scratchDir.appendingPathComponent("recovery.sqlite")
 
         let store = HistoryStore(url: dbURL)
         store.record(
@@ -275,16 +273,56 @@ final class HistoryStoreTests: XCTestCase {
         XCTAssertNil(store.lastError, "a stale failure must not sit in the panel once queries work again")
     }
 
+    func testAFailedInsertRollsBackInsteadOfPartiallyCommitting() throws {
+        let scratchDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HogHunterTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: scratchDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: scratchDir) }
+        let dbURL = scratchDir.appendingPathComponent("rollback.sqlite")
+
+        let store = HistoryStore(url: dbURL)
+        store.record(
+            samples: [sample(pid: 60, start: 1, name: "Before", cpu: 5, memory: 100)],
+            groupKey: { $0.name },
+            bundleId: { _ in nil },
+            coreCount: 4,
+            at: Date(timeIntervalSince1970: 1_000)
+        )
+        XCTAssertNil(store.lastError)
+        let ticksBefore = try runSQLite(at: dbURL.path, sql: "SELECT COUNT(*) FROM ticks;").trimmed
+
+        // Pull `samples` out from under the open connection, so the next
+        // `record` fails partway through its transaction -- on the very first
+        // statement, `DELETE FROM samples WHERE ts = ?`, which cannot even be
+        // prepared without the table.
+        try runSQLite(at: dbURL.path, sql: "DROP TABLE samples;")
+
+        store.record(
+            samples: [sample(pid: 61, start: 2, name: "After", cpu: 6, memory: 200)],
+            groupKey: { $0.name },
+            bundleId: { _ in nil },
+            coreCount: 4,
+            at: Date(timeIntervalSince1970: 2_000)
+        )
+        XCTAssertNotNil(store.lastError, "a failed insert must be reported")
+
+        // Before the fix, `COMMIT` ran unconditionally: the `ticks` insert
+        // that precedes the (impossible) `samples` insert would have
+        // committed on its own, leaving an orphaned tick with no sample rows
+        // that nothing would ever revisit.  A real rollback means the tick
+        // count here is unchanged.
+        let ticksAfter = try runSQLite(at: dbURL.path, sql: "SELECT COUNT(*) FROM ticks;").trimmed
+        XCTAssertEqual(ticksAfter, ticksBefore, "a failed insert must roll back the whole tick, not just skip the failing statement")
+    }
+
     // MARK: - Migration
 
     func testV1DatabaseMigratesToV2Schema() throws {
-        let scratchDir = URL(
-            fileURLWithPath: "/private/tmp/claude-501/-Users-jay-Code-HogHunter/da3e5df1-ebc2-4be9-8c4e-126b394e8ab3/scratchpad/impl-tests",
-            isDirectory: true
-        )
+        let scratchDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HogHunterTests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: scratchDir, withIntermediateDirectories: true)
-        let dbURL = scratchDir.appendingPathComponent("migration-\(UUID().uuidString).sqlite")
-        defer { try? FileManager.default.removeItem(at: dbURL) }
+        defer { try? FileManager.default.removeItem(at: scratchDir) }
+        let dbURL = scratchDir.appendingPathComponent("migration.sqlite")
 
         // Seed a v1-shaped database: an old `samples` table with none of the
         // v2 columns, and the default user_version of 0.  v1 stored raw mach

@@ -143,7 +143,7 @@ struct HogRow: Identifiable, Hashable {
 
 `func quit(_ row: HogRow, force: Bool) -> QuitOutcome` where each member is checked in order: identity (current `ri_proc_start_abstime` equals the key's `startTime`, otherwise skipped as "changed since sampling"), ownership (`uid == getuid()`), denylist (`kernel_task`, `launchd`, `WindowServer`, `loginwindow`, `Finder`, `Dock`, `SystemUIServer`, `ControlCenter`, `NotificationCenter`, `coreaudiod`, and Hog Hunter itself), then action: `NSRunningApplication.terminate()` / `forceTerminate()` when the pid is a running application, else `kill(SIGTERM)` / `kill(SIGKILL)`.  Returns per-member results for the UI.  `canQuit` on a row is false when every member is blocked, and `quitBlockReason` explains why.
 
-Alert copy: title "Quit <name>?", message "Asks <name> to quit.  It may show a save prompt or refuse.  <N> processes are included." and for force "Force Quit ends <N> processes immediately.  Unsaved work is lost."  Buttons: Cancel (Escape dismisses it; nothing is bound to Return, because an `NSButton` holds one key equivalent and Return-on-Cancel would take Escape's place), Quit, Force Quit (destructive).
+Alert copy: title "Quit <name>?", message "Asks <name> to quit.  It may show a save prompt or refuse.  <N> processes are included." and for force "Force Quit ends <N> processes immediately.  Unsaved work is lost."  Buttons: Cancel (Escape dismisses it; Return is not bound to any of the three, so a reflex press cannot trigger Quit or Force Quit), Quit, Force Quit (destructive).
 
 ## HistoryStore v2
 

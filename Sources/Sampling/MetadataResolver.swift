@@ -27,6 +27,13 @@ final class MetadataResolver {
         var icon: NSImage?
         var activationPolicy: NSApplication.ActivationPolicy?
         var isRunningApplication: Bool
+        /// True when this entry was built from an `AppInfo` that had not yet
+        /// settled (a nil bundle id, name or URL) -- a freshly launched app
+        /// publishing itself asynchronously.  A provisional entry is never
+        /// served from the cache, so the resolver keeps re-reading it every
+        /// call until the app settles, at which point it is overwritten with
+        /// a normal, cached entry.
+        var isProvisional: Bool = false
     }
 
     /// What `NSWorkspace.runningApplications` knows about one process.  Reading
@@ -58,16 +65,20 @@ final class MetadataResolver {
 
     /// Refreshes the running-application table and returns it.  Enumerating is
     /// cheap; reading each app's properties is not, so a pid already in the
-    /// table keeps the entry it had.  A recycled pid can therefore carry the
-    /// previous app's name for one tick, which is the same risk the per-key
-    /// metadata cache already takes and is invisible at a 3 s cadence.
+    /// table keeps the entry it had once it is settled.  A recycled pid can
+    /// therefore carry the previous app's name for one tick, which is the same
+    /// risk the per-key metadata cache already takes and is invisible at a 3 s
+    /// cadence.  A settled entry's `activationPolicy` can still legitimately
+    /// change later (an accessory helper promoted to regular, and vice versa),
+    /// so the caller periodically passes `force: true` to re-read every app
+    /// rather than trust the memo forever.
     @discardableResult
-    func refreshRunningApps() -> [pid_t: AppInfo] {
+    func refreshRunningApps(force: Bool = false) -> [pid_t: AppInfo] {
         var table: [pid_t: AppInfo] = [:]
         table.reserveCapacity(runningApps.count)
         for app in enumerate() {
             let pid = app.processIdentifier
-            if let known = runningApps[pid], known.isSettled {
+            if !force, let known = runningApps[pid], known.isSettled {
                 table[pid] = known
                 continue
             }
@@ -91,12 +102,17 @@ final class MetadataResolver {
     }
 
     /// Resolves only the keys asked for.  Anything already cached is returned
-    /// without touching AppKit again.
+    /// without touching AppKit again -- unless that entry is `isProvisional`,
+    /// in which case the cache is bypassed and the key is re-read until the
+    /// app it belongs to settles.  Without this, a key first resolved while
+    /// its app was still launching would keep serving that half-published
+    /// entry (often just "pid 1234") forever, never picking up the real name
+    /// once `NSRunningApplication` finishes publishing it.
     func resolve(_ keys: [ProcessKey], samples: [ProcessKey: ProcessSample]) -> [ProcessKey: Metadata] {
         var out: [ProcessKey: Metadata] = [:]
         out.reserveCapacity(keys.count)
         for key in keys {
-            if let cached = cache[key] {
+            if let cached = cache[key], !cached.isProvisional {
                 out[key] = cached
                 continue
             }
@@ -109,7 +125,8 @@ final class MetadataResolver {
                 bundleId: bundle,
                 icon: icon(bundleId: bundle, bundleURL: app?.bundleURL, path: sample?.path),
                 activationPolicy: app?.activationPolicy,
-                isRunningApplication: app != nil
+                isRunningApplication: app != nil,
+                isProvisional: app?.isSettled == false
             )
             cache[key] = metadata
             out[key] = metadata
