@@ -1,25 +1,37 @@
 #!/bin/bash
-# Build Hog Hunter Release, sign it, and install it to ~/Applications.
+# Build Hog Hunter Release, sign it, and install it.
 #
-# Usage: scripts/install.sh [--adhoc] [--no-launch] [--dry-run]
+# Usage: scripts/install.sh [--adhoc] [--no-launch] [--dry-run] [--dest PATH]
 #   --adhoc      Skip Developer ID signing even if the identity is available.
 #   --no-launch  Install but do not open Hog Hunter afterward.
 #   --dry-run    Build only.  Print what would happen next.  Never sign,
-#                quit the running app, copy to ~/Applications, or launch.
+#                quit the running app, copy to the destination, or launch.
+#   --dest PATH  Directory to install HogHunter.app into.  Default: if
+#                /Applications/HogHunter.app already exists, install there;
+#                otherwise install to ~/Applications.
 set -euo pipefail
 
 ADHOC=0
 NO_LAUNCH=0
 DRY_RUN=0
+DEST_ARG=""
 
-for arg in "$@"; do
-  case "$arg" in
-    --adhoc) ADHOC=1 ;;
-    --no-launch) NO_LAUNCH=1 ;;
-    --dry-run) DRY_RUN=1 ;;
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --adhoc) ADHOC=1; shift ;;
+    --no-launch) NO_LAUNCH=1; shift ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    --dest)
+      if [[ $# -lt 2 ]]; then
+        echo "--dest requires a PATH argument" >&2
+        exit 1
+      fi
+      DEST_ARG="$2"
+      shift 2
+      ;;
     *)
-      echo "Unknown argument: $arg" >&2
-      echo "Usage: $0 [--adhoc] [--no-launch] [--dry-run]" >&2
+      echo "Unknown argument: $1" >&2
+      echo "Usage: $0 [--adhoc] [--no-launch] [--dry-run] [--dest PATH]" >&2
       exit 1
       ;;
   esac
@@ -29,7 +41,22 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 APP_PATH="build/Build/Products/Release/HogHunter.app"
-INSTALLED_PATH="$HOME/Applications/HogHunter.app"
+
+SYSTEM_APPLICATIONS="/Applications"
+USER_APPLICATIONS="$HOME/Applications"
+
+if [[ -n "$DEST_ARG" ]]; then
+  DEST_DIR="$DEST_ARG"
+  echo "Destination: $DEST_DIR (explicit --dest)."
+elif [[ -d "$SYSTEM_APPLICATIONS/HogHunter.app" ]]; then
+  DEST_DIR="$SYSTEM_APPLICATIONS"
+  echo "Destination: $DEST_DIR (found an existing install there)."
+else
+  DEST_DIR="$USER_APPLICATIONS"
+  echo "Destination: $DEST_DIR (default; no existing install found in $SYSTEM_APPLICATIONS)."
+fi
+
+INSTALLED_PATH="$DEST_DIR/HogHunter.app"
 
 version_of() {
   /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$1/Contents/Info.plist" 2>/dev/null || echo "unknown"
@@ -96,7 +123,7 @@ if pgrep -x HogHunter >/dev/null 2>&1; then
 fi
 
 echo "Installing to $INSTALLED_PATH."
-mkdir -p "$HOME/Applications"
+mkdir -p "$DEST_DIR"
 ditto "$APP_PATH" "$INSTALLED_PATH"
 
 if [[ "$NO_LAUNCH" -eq 0 ]]; then
@@ -106,4 +133,16 @@ else
   echo "Skipping launch (--no-launch)."
 fi
 
-echo "Installed Hog Hunter $(version_of "$INSTALLED_PATH")."
+# Warn if the other well-known location also holds a copy, so it doesn't
+# quietly run stale or fight over the menu bar item.  Doesn't touch it.
+OTHER_DIR=""
+if [[ "$DEST_DIR" == "$SYSTEM_APPLICATIONS" ]]; then
+  OTHER_DIR="$USER_APPLICATIONS"
+elif [[ "$DEST_DIR" == "$USER_APPLICATIONS" ]]; then
+  OTHER_DIR="$SYSTEM_APPLICATIONS"
+fi
+if [[ -n "$OTHER_DIR" && -d "$OTHER_DIR/HogHunter.app" ]]; then
+  echo "Warning: a duplicate copy also exists at $OTHER_DIR/HogHunter.app -- consider removing it."
+fi
+
+echo "Installed Hog Hunter $(version_of "$INSTALLED_PATH") to $INSTALLED_PATH."
