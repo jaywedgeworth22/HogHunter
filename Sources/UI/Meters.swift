@@ -50,11 +50,18 @@ struct MeterPill: View {
     var body: some View {
         Text(text)
             .font(.system(size: 10, weight: .medium))
+            .multilineTextAlignment(.center)
             .foregroundStyle(tint)
-            .padding(.horizontal, 7)
-            .padding(.vertical, 2.5)
-            .background(Capsule(style: .continuous).fill(fill))
-            .overlay(Capsule(style: .continuous).stroke(tint.opacity(0.25), lineWidth: 0.5))
+            .padding(.horizontal, 5)
+            .padding(.vertical, 3)
+            .background(
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .fill(fill)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .stroke(tint.opacity(0.25), lineWidth: 0.5)
+            )
             .help(help ?? text)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(text)
