@@ -112,7 +112,7 @@ struct HogHunterPanel: View {
                     accessibilityDetail: store.memoryCaption
                 )
                 if !pills.isEmpty {
-                    HStack(spacing: 5) {
+                    HStack(spacing: 4) {
                         ForEach(pills, id: \.text) { pill in
                             MeterPill(text: pill.text, severity: pill.severity, help: pill.help)
                         }

@@ -9,3 +9,4 @@ Mirror of the live fleet board rows for this app.  Reserve a row before starting
 | Mon, Sep 8, 2026 | CLAUDE | claude/hog-hunter-ci | Landed (#2) | Test target, GitHub Actions CI on macOS, hardened Release without get-task-allow, scripts/install.sh with Developer ID signing and adhoc fallback |
 | Wed, Sep 10, 2026 | CLAUDE | claude/hog-hunter-release-1.1 | Landed (#5) | Version 1.1.0, CHANGELOG release, installed to ~/Applications |
 | Wed, Sep 10, 2026 | CLAUDE | claude/hog-hunter-install-dest | Landed (#6) | install.sh --dest, default /Applications, docs |
+| Fri, Sep 11, 2026 | AG | ag/meter-pill-radius | In Progress | Smaller corner radius on status pills to prevent text clipping (board 95889b53) |
