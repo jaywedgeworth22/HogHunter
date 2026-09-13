@@ -220,8 +220,12 @@ final class Sampler: @unchecked Sendable {
 
     /// `proc_name` truncates at 31 characters, which turns distinct helpers
     /// into the same string.  When it is at the limit the executable's last
-    /// path component is used instead.
+    /// path component is used instead.  Claude Code's CLI is a special case
+    /// of that: its binary file is itself named after the version being run
+    /// (see `ClaudeProcess`), so both `proc_name` and the path fallback can
+    /// surface a raw version string like "2.1.266" instead of a readable name.
     private func displayName(pid: pid_t, path: String) -> String {
+        if ClaudeProcess.isCLI(path: path) { return ClaudeProcess.displayName }
         var buffer = [CChar](repeating: 0, count: 64)
         var name = proc_name(pid, &buffer, UInt32(buffer.count)) > 0 ? String(cString: buffer) : ""
         let component = path.isEmpty ? "" : (path as NSString).lastPathComponent
