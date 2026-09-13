@@ -115,6 +115,49 @@ final class GroupingTests: XCTestCase {
         XCTAssertEqual(group.members.count, 2)
     }
 
+    // MARK: - Claude CLI family
+
+    func testTwoUnrelatedClaudeSessionsStaySeparateDespiteSharingAPath() {
+        // Two independent terminal sessions running the same CLI binary --
+        // ppid 1 stands in for "parent is a shell, not another Claude
+        // process".  Merging these would make Quit on one row kill every
+        // unrelated fleet session sharing that binary.
+        let claudeVersionsPath = "/Users/jay/.local/share/claude/versions/2.1.266"
+        let sessionA = sample(pid: 500, ppid: 1, name: "claude", path: claudeVersionsPath)
+        let sessionB = sample(pid: 501, ppid: 1, name: "claude", path: claudeVersionsPath)
+
+        let groups = Grouping.groups([sessionA, sessionB], isRegularApp: { _ in false }, bundleId: { _ in nil })
+
+        XCTAssertEqual(groups.count, 2)
+        XCTAssertEqual(Set(groups.map(\.key)), ["claude:500", "claude:501"])
+    }
+
+    func testClaudeWorkerSubprocessGroupsUnderItsOwnSession() {
+        // A session's own worker subprocess (verified by ppid, not by path)
+        // folds into that session's row instead of staying separate.
+        let claudeVersionsPath = "/Users/jay/.local/share/claude/versions/2.1.266"
+        let session = sample(pid: 600, ppid: 1, name: "claude", path: claudeVersionsPath)
+        let worker = sample(pid: 601, ppid: 600, name: "claude", path: claudeVersionsPath, cpu: 10, memory: 500)
+
+        let groups = Grouping.groups([session, worker], isRegularApp: { _ in false }, bundleId: { _ in nil })
+
+        XCTAssertEqual(groups.count, 1)
+        let group = try! XCTUnwrap(groups.first)
+        XCTAssertEqual(group.key, "claude:600")
+        XCTAssertEqual(group.members.count, 2)
+        XCTAssertFalse(group.isApp)
+    }
+
+    func testUnrelatedNonClaudeProcessOnAClaudePathIsUnaffected() {
+        // Sanity check that the Claude-specific branch only ever fires for
+        // paths ClaudeProcess.isCLI recognizes.
+        let other = sample(pid: 700, ppid: 1, name: "node", path: "/usr/local/bin/node")
+
+        let groups = Grouping.groups([other], isRegularApp: { _ in false }, bundleId: { _ in nil })
+
+        XCTAssertEqual(groups.first?.key, "path:/usr/local/bin/node")
+    }
+
     // MARK: - Cycle safety
 
     func testPpidCycleTerminatesAndFallsBackWithoutMerging() {

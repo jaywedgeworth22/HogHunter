@@ -49,6 +49,15 @@ enum Grouping {
             } else if let bundle = bundleId(sample.key.pid), !bundle.isEmpty {
                 groupKey = "bundle:" + bundle
                 isApp = false
+            } else if let anchor = claudeCLIAnchor(of: sample, byPid: byPid) {
+                // Same executable path is not enough here: every independent
+                // `claude` session run from a terminal shares one binary, and
+                // merging all of them the way the generic path fallback below
+                // does would make Quit on one row kill every unrelated fleet
+                // session at once.  Only a verified parent/child chain -- a
+                // session's own worker subprocesses -- is folded together.
+                groupKey = "claude:\(anchor)"
+                isApp = false
             } else if !sample.path.isEmpty {
                 groupKey = "path:" + sample.path
                 isApp = false
@@ -101,5 +110,28 @@ enum Grouping {
             depth += 1
         }
         return nil
+    }
+
+    /// The topmost ancestor (or `sample` itself) that is also a Claude CLI
+    /// process.  A plain terminal session's parent is a shell, not another
+    /// Claude process, so it anchors itself and stays its own row; a
+    /// session's own worker subprocess walks up to that session and folds
+    /// into it.  Nil when `sample` is not a Claude CLI process at all.
+    private static func claudeCLIAnchor(
+        of sample: ProcessSample,
+        byPid: [pid_t: ProcessSample]
+    ) -> pid_t? {
+        guard ClaudeProcess.isCLI(path: sample.path) else { return nil }
+        var anchor = sample.key.pid
+        var depth = 0
+        while depth < maxDepth {
+            guard let parent = byPid[anchor]?.ppid, parent > 1,
+                  let parentSample = byPid[parent],
+                  ClaudeProcess.isCLI(path: parentSample.path)
+            else { break }
+            anchor = parent
+            depth += 1
+        }
+        return anchor
     }
 }
