@@ -111,9 +111,19 @@ struct SettingsView: View {
 
     private var about: some View {
         Section("About") {
-            LabeledContent("Version") {
-                Text(Self.versionString)
-                    .monospacedDigit()
+            HStack(spacing: 12) {
+                Image(nsImage: NSApp.applicationIconImage)
+                    .resizable()
+                    .interpolation(.high)
+                    .frame(width: 56, height: 56)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Hog Hunter")
+                    Text(Self.versionString)
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
             }
             Button("Open Activity Monitor") { HogActions.openActivityMonitor() }
                 .buttonStyle(.link)
