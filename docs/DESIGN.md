@@ -36,8 +36,13 @@ Sources/
   UI/Meters.swift                 CPU and Memory meters with captions and severity color
   UI/RowView.swift                row with context menu
   UI/SettingsView.swift           settings
+  Assets.xcassets/AppIcon         Square Finder/About icon; no pre-applied squircle crop
 Tests/HogHunterTests/             XCTest: CpuMath, MemoryMath, Grouping, HistoryStore, HogFormat, AlertPolicy, MetadataResolver
 scripts/install.sh                build, sign, install to ~/Applications, relaunch
+
+## App icon
+
+The Finder / About / notification icon is `Assets.xcassets/AppIcon.appiconset`, compiled from a 1024×1024 square PNG of the circular boar emblem on a dark charcoal canvas.  The source is not squircle-cropped; macOS applies the system mask at display time.  `LSUIElement` still hides the Dock icon while the menu bar extra is running.
 .github/workflows/ci.yml          macOS runner: xcodegen + xcodebuild test
 HogHunter.entitlements            empty; Release has no get-task-allow and hardened runtime on
 ```

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Finder, About, and notification chrome now use a square app icon adapted from the boar emblem.  The artwork is a full-bleed 1024 canvas with no pre-applied squircle crop; macOS applies the system mask at display time.
+
 ## 1.1.0 — Wed, Sep 10, 2026
 
 Sampling and data layer:
