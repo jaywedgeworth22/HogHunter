@@ -11,4 +11,4 @@ Mirror of the live fleet board rows for this app.  Reserve a row before starting
 | Wed, Sep 10, 2026 | CLAUDE | claude/hog-hunter-install-dest | Landed (#6) | install.sh --dest, default /Applications, docs |
 | Fri, Sep 11, 2026 | AG | ag/meter-pill-radius | Landed (#7) | Smaller corner radius on status pills to prevent text clipping (board 95889b53) |
 | Sun, Sep 13, 2026 | CLAUDE | claude/label-and-group-claude-cli-processes | Landed (#8) | Label Claude Code CLI processes correctly and group by verified process family |
-| Thu, Sep 17, 2026 | GROK | grok/app-icon-adaptation | In Progress | Square AppIcon from the boar emblem, no pre-applied squircle crop (board 70b57198) |
+| Thu, Sep 17, 2026 | GROK | grok/app-icon-adaptation | In Progress (#9) | Square AppIcon from the boar emblem, no pre-applied squircle crop (board 70b57198) |
