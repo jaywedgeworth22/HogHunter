@@ -12,3 +12,4 @@ Mirror of the live fleet board rows for this app.  Reserve a row before starting
 | Fri, Sep 11, 2026 | AG | ag/meter-pill-radius | Landed (#7) | Smaller corner radius on status pills to prevent text clipping (board 95889b53) |
 | Sun, Sep 13, 2026 | CLAUDE | claude/label-and-group-claude-cli-processes | Landed (#8) | Label Claude Code CLI processes correctly and group by verified process family |
 | Thu, Sep 17, 2026 | GROK | grok/app-icon-adaptation | Landed (#9) | Square AppIcon from the boar emblem, no pre-applied squircle crop (board 70b57198) |
+| Fri, Sep 18, 2026 | CURSOR | main | Landed (#10) | Health sweep: 76 XCTest tests pass, app launches and samples correctly, no open board items, no open GitHub issues.  Deleted 166 MB of stray `build_test/` derived data, added `build_test/` to `.gitignore` so future `-derivedDataPath build_test` runs cannot leave it behind. |
