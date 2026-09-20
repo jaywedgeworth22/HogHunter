@@ -20,6 +20,8 @@ struct HogHunterPanel: View {
         .preferredColorScheme(store.appearance.colorScheme)
         .onAppear { store.panelVisible = true }
         .onDisappear { store.panelVisible = false }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Hog Hunter — top processes")
         .alert(
             pendingQuit.map { "Quit \($0.name)?" } ?? "Quit Process?",
             isPresented: Binding(
@@ -67,11 +69,19 @@ struct HogHunterPanel: View {
                       ? Color(red: 0.80, green: 0.52, blue: 0.10)
                       : Color(red: 0.16, green: 0.58, blue: 0.30))
                 .frame(width: 7, height: 7)
-                .help(store.isStale ? "Sampling is behind." : "Sampling is up to date.")
-                .accessibilityLabel(store.isStale ? "Sampling is behind" : "Sampling is up to date")
+            if store.alertsEnabled {
+                Image(systemName: "bell.fill")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .help("Alerts on at \(Int(store.alertThresholdPercent))% for \(store.alertSustainedMinutes) min.")
+                    .accessibilityLabel("Alerts on at \(Int(store.alertThresholdPercent))% for \(store.alertSustainedMinutes) minutes")
+            }
             Spacer()
             gearMenu
         }
+        .help(store.isStale ? "Sampling is behind." : "Sampling is up to date.")
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(store.isStale ? "Hog Hunter, sampling is behind" : "Hog Hunter, sampling is up to date")
     }
 
     private var gearMenu: some View {
@@ -176,10 +186,17 @@ struct HogHunterPanel: View {
 
     private var captions: some View {
         VStack(alignment: .leading, spacing: 3) {
-            Text(store.hasBaseline ? store.attributionCaption : "Measuring…  The first CPU reading needs two samples.")
-                .font(.system(size: 10.5))
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            if let attributed = store.attributionCaption {
+                Text(attributed)
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if !store.hasBaseline {
+                Text("Measuring…  The first CPU reading needs two samples.")
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if let swapping = store.swapRateCaption {
                 Text(swapping)
                     .font(.system(size: 10.5))

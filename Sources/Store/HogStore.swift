@@ -51,7 +51,18 @@ final class HogStore: ObservableObject {
     @Published var cpuScale: CpuScale = .perCore { didSet { persist() } }
     @Published var menuBarLabelMode: MenuBarLabelMode = .machinePercent { didSet { persist() } }
     @Published var refreshInterval: TimeInterval = 3 { didSet { persist(); restartTimer() } }
-    @Published var alertsEnabled = false { didSet { persist(); alertsSwitched() } }
+    @Published var alertsEnabled = false {
+        didSet {
+            persist()
+            alertsSwitched()
+            // A row that was in cooldown when alerts were turned off should
+            // not fire the moment alerts come back on, and a row that was
+            // already most of the way through a sustained window should not
+            // finish it without a fresh threshold-crossing tick.  Reset the
+            // policy so re-enabling starts from a clean slate.
+            if !alertsEnabled { alerts.resetPolicy() }
+        }
+    }
     /// Per-core, so 300 means three cores fully busy.
     @Published var alertThresholdPercent: Double = 300 { didSet { persist() } }
     @Published var alertSustainedMinutes: Int = 5 { didSet { persist() } }
@@ -217,10 +228,19 @@ final class HogStore: ObservableObject {
         isStale = false
 
         samples = Dictionary(uniqueKeysWithValues: snapshot.processes.map { ($0.key, $0) })
-        // Every 20th tick, re-read every running app's activationPolicy instead
-        // of trusting the memo -- an app can be promoted from accessory to
-        // regular (or back) well after it first settles.
-        resolver.refreshRunningApps(force: tickIndex % 20 == 0)
+        // The running-app table is the most expensive thing Hog Hunter does on
+        // the main actor (NSWorkspace.shared.runningApplications enumerates
+        // ~250 apps and reading four properties off each costs ~40 ms), so it
+        // is rebuilt on a slower cadence than the sampler: every fifth tick,
+        // which matches the history-record cadence (default ~15 s with a 3 s
+        // refresh).  Every twentieth tick is a force refresh, which re-reads
+        // an app even when it has already settled, so an app promoted from
+        // accessory to regular (or back) after launch picks up the change.
+        let resolverTick = tickIndex % 5 == 0
+        let forceRefresh = tickIndex % 20 == 0
+        if resolverTick {
+            resolver.refreshRunningApps(force: forceRefresh)
+        }
         let groups = Grouping.groups(
             snapshot.processes,
             isRegularApp: { [resolver] pid in resolver.isRegularApp(pid) },
@@ -571,11 +591,25 @@ final class HogStore: ObservableObject {
     }
 
     /// Who the machine's CPU belongs to, and how much of it we cannot see.
-    var attributionCaption: String {
+    /// Returns nil when there is nothing interesting to say (an idle machine
+    /// where every CPU percent is 0 and every process is readable), so the
+    /// panel can hide the line instead of printing "0% · 0% (0 processes not
+    /// readable)".
+    var attributionCaption: String? {
         let visible = HogFormat.percent(pulse.visibleCpuPercent / 100)
         let rest = HogFormat.percent(pulse.invisibleCpuPercent / 100)
-        return "\(visible) attributed to \(pulse.readableProcessCount) visible processes · "
-            + "\(rest) other users, root and kernel (\(pulse.unreadableProcessCount) processes not readable)"
+        let unreadable = pulse.unreadableProcessCount
+        // A boring line is "0% attributed to N visible processes · 0% other …"
+        // — hide the whole row unless at least one of the three numbers is
+        // doing some work.
+        if pulse.visibleCpuPercent <= 0,
+           pulse.invisibleCpuPercent <= 0,
+           unreadable == 0 { return nil }
+        var pieces = ["\(visible) attributed to \(pulse.readableProcessCount) visible processes"]
+        if pulse.invisibleCpuPercent > 0 || unreadable > 0 {
+            pieces.append("\(rest) other users, root and kernel (\(unreadable) processes not readable)")
+        }
+        return pieces.joined(separator: " · ")
     }
 
     var scaleLegend: String {
@@ -685,8 +719,8 @@ final class HogStore: ObservableObject {
 
     private func gigabytes(_ bytes: UInt64) -> String {
         let value = Double(bytes) / 1_073_741_824
-        if value == value.rounded() { return String(format: "%.0f", value) }
-        return String(format: "%.1f", value)
+        if value == value.rounded() { return String(format: "%.0f", locale: Locale(identifier: "en_US_POSIX"), value) }
+        return String(format: "%.1f", locale: Locale(identifier: "en_US_POSIX"), value)
     }
 
     // MARK: - Actions

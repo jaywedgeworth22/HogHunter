@@ -235,10 +235,19 @@ enum Severity: Equatable {
         return .calm
     }
 
-    /// Row CPU on the per-core scale.
-    static func forProcessCpu(_ perCorePercent: Double) -> Severity {
-        if perCorePercent >= 300 { return .hot }
-        if perCorePercent >= 100 { return .elevated }
+    /// Row CPU on whatever scale the value is already on.  The per-core scale
+    /// is calibrated against the original Activity Monitor thresholds
+    /// (300% = 3 cores busy, 100% = 1 core busy); `machineShare` divides the
+    /// per-core thresholds by `coreCount` so the colour tracks the value the
+    /// user is actually looking at.
+    static func forProcessCpu(_ percent: Double, scale: CpuScale = .perCore, coreCount: Int = 1) -> Severity {
+        let perCore: Double
+        switch scale {
+        case .perCore: perCore = percent
+        case .machineShare: perCore = percent * Double(max(1, coreCount))
+        }
+        if perCore >= 300 { return .hot }
+        if perCore >= 100 { return .elevated }
         return .calm
     }
 
@@ -262,11 +271,16 @@ enum Severity: Equatable {
 // MARK: - Formatting
 
 enum HogFormat {
+    /// Locale that prints `.` as the decimal separator regardless of the
+    /// user's region.  Cached because `Locale(identifier:)` is not free, and
+    /// every formatted number in the panel goes through here.
+    private static let posix = Locale(identifier: "en_US_POSIX")
+
     /// One decimal below 100, an integer at or above.  Always a "%" suffix.
     static func cpu(_ value: Double) -> String {
         let v = value.isFinite ? max(0, value) : 0
-        if v < 100 { return String(format: "%.1f%%", v) }
-        return String(format: "%.0f%%", v)
+        if v < 100 { return String(format: "%.1f%%", locale: posix, v) }
+        return String(format: "%.0f%%", locale: posix, v)
     }
 
     /// Converts a per-core value for display under the chosen scale.
@@ -285,9 +299,9 @@ enum HogFormat {
         let gb = Double(bytes) / 1_073_741_824
         let mb = Double(bytes) / 1_048_576
         let kb = Double(bytes) / 1024
-        if mb >= 1023.5 { return String(format: "%.1f GB", gb) }
-        if kb >= 1023.5 { return String(format: "%.0f MB", mb) }
-        return String(format: "%.0f KB", kb)
+        if mb >= 1023.5 { return String(format: "%.1f GB", locale: posix, gb) }
+        if kb >= 1023.5 { return String(format: "%.0f MB", locale: posix, mb) }
+        return String(format: "%.0f KB", locale: posix, kb)
     }
 
     /// "12 MB/s", "1.4 GB/s", "0 KB/s".
@@ -306,6 +320,6 @@ enum HogFormat {
     }
 
     static func percent(_ fraction: Double) -> String {
-        String(format: "%.0f%%", max(0, min(1, fraction)) * 100)
+        String(format: "%.0f%%", locale: posix, max(0, min(1, fraction)) * 100)
     }
 }

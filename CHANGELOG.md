@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.2.0 — Sun, Sep 20, 2026
+
+Performance:
+
+- The running-app resolver now refreshes every fifth tick (matching the history-record cadence) instead of every tick.  `NSWorkspace.shared.runningApplications` enumerates ~250 apps and reading four properties off each costs the main actor ~40 ms per call, so this drops the per-tick cost noticeably on the default 3 s interval.  Every twentieth tick is still a forced refresh so an app that is promoted from accessory to regular (or back) after launch picks up the change within a few seconds.
+- Hog Hunter's own process is filtered at the sampler, so the panel no longer shows a row the user cannot act on.
+
+Correctness:
+
+- `HogFormat.cpu`, `.memory`, `.rate`, and `.percent` are now pinned to `en_US_POSIX`, so a French or German Mac prints `1.5 GB` and `99.6%` (matching Activity Monitor) instead of `1,5 GB` and `99,6 %`.
+- `AlertPolicy` is reset whenever alerts are toggled off, so re-enabling starts from a clean slate.  A row that was in cooldown when alerts were turned off can no longer fire immediately, and a row that was four minutes into a five-minute sustained window can no longer finish where it left off.
+- `Severity.forProcessCpu` now takes a `CpuScale` and a `coreCount`, so the colour of a row tracks the value the user is actually looking at.  A process showing `12.5%` on the `machineShare` scale (one core on an 8-core machine) is calm, even though the same value on the per-core scale would have been elevated.
+
+User interface:
+
+- The panel header now shows a small bell icon next to the name when alerts are on, with the threshold and sustained duration as the tooltip.
+- The header title and staleness dot are now a single accessibility element, so VoiceOver announces the panel state once.
+- The whole panel is wrapped in a single accessibility element labelled `Hog Hunter — top processes`, so VoiceOver does not read row-by-row with no panel context.
+- `attributionCaption` returns `nil` on an idle machine where everything is zero and every process is readable, so the panel hides the line instead of printing `0% · 0% (0 processes not readable)`.
+
 ## Unreleased
 
 - Finder, About, and notification chrome now use a square app icon adapted from the boar emblem.  The artwork is a full-bleed 1024 canvas with no pre-applied squircle crop; macOS applies the system mask at display time.

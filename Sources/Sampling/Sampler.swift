@@ -45,6 +45,11 @@ final class Sampler: @unchecked Sendable {
         var next: [ProcessKey: Previous] = [:]
 
         for pid in listPids() {
+            // Hog Hunter is itself readable, so its own row would otherwise
+            // appear in the panel with the lock icon and a "this app" Quit
+            // reason.  Filter at the source so the row never reaches the
+            // grouping or alerting paths.
+            if pid == selfPid { continue }
             let rusage = processRusage(pid)
             let task = taskInfo(pid)
             let bsd = bsdInfo(pid)
