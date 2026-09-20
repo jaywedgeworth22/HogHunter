@@ -52,9 +52,12 @@ struct HogRowView: View {
     }
 
     /// A hot row earns its color; a quiet one stays in the ordinary text color
-    /// so the list does not glow blue from top to bottom.
+    /// so the list does not glow blue from top to bottom.  The colour tracks
+    /// the value the user is actually looking at, so a process showing 12.5%
+    /// on the `machineShare` scale (one core on an 8-core machine) is calm,
+    /// even though the same value on the per-core scale would be elevated.
     private var cpuColor: Color {
-        let severity = Severity.forProcessCpu(row.cpuPercent)
+        let severity = Severity.forProcessCpu(row.cpuPercent, scale: scale, coreCount: coreCount)
         return severity == .calm ? Color.primary : severity.color
     }
 

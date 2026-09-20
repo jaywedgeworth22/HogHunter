@@ -60,6 +60,16 @@ struct AlertPolicy {
         firstExceeded = firstExceeded.filter { live.contains($0.key) }
         lastFired = lastFired.filter { live.contains($0.key) || now.timeIntervalSince($0.value) < cooldown }
     }
+
+    /// Drops every entry, the way it looked when alerts were first switched on.
+    /// Called when alerting is turned off, so re-enabling starts from a clean
+    /// slate instead of letting a row that was in cooldown fire immediately
+    /// or letting a row that was 4 minutes into a 5-minute sustained window
+    /// fire after only one more minute.
+    mutating func reset() {
+        firstExceeded.removeAll()
+        lastFired.removeAll()
+    }
 }
 
 /// Turns sustained CPU into one notification, and nothing else.
@@ -82,6 +92,14 @@ final class Alerts: NSObject, ObservableObject, UNUserNotificationCenterDelegate
 
     private var policy = AlertPolicy()
     private var didRequestAuthorization = false
+
+    /// Drops every entry the policy is tracking.  Called when alerts are
+    /// turned off, so re-enabling starts from a clean slate and a row that
+    /// was in cooldown (or most of the way through a sustained window) does
+    /// not finish where it left off.
+    func resetPolicy() {
+        policy.reset()
+    }
 
     /// Nil when there is no bundle to notify from, which is the case in unit
     /// tests and in any unbundled run.  Asking for the centre in that state

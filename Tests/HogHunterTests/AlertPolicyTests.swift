@@ -150,6 +150,49 @@ final class AlertPolicyTests: XCTestCase {
         XCTAssertFalse(policy.step(id: "b", above: true, now: at(sustained)), "b's clock restarted")
     }
 
+    // MARK: - Reset
+
+    /// Reset drops every entry, the way it looked when the policy was first
+    /// created.  Used when alerting is turned off, so re-enabling starts from
+    /// a clean slate instead of letting a row that was in cooldown fire
+    /// immediately or letting a row that was almost through a sustained
+    /// window finish where it left off.
+    func testResetDropsEveryEntry() {
+        var policy = makePolicy()
+        _ = policy.step(id: "a", above: true, now: at(0))
+        _ = policy.step(id: "b", above: true, now: at(0))
+        _ = policy.step(id: "a", above: true, now: at(sustained))   // a fires
+        XCTAssertEqual(policy.trackedIds, ["a", "b"])
+        policy.reset()
+        XCTAssertEqual(policy.trackedIds, [])
+        // Both rows start over: neither is in cooldown, neither is partway
+        // through a sustained window.
+        XCTAssertFalse(policy.step(id: "a", above: true, now: at(sustained + 1)))
+        XCTAssertFalse(policy.step(id: "b", above: true, now: at(sustained + 1)))
+    }
+
+    func testResetAllowsARowThatJustFiredToFireAgainOnTheNextTick() {
+        var policy = makePolicy()
+        _ = policy.step(id: "a", above: true, now: at(0))
+        _ = policy.step(id: "a", above: true, now: at(sustained))
+        XCTAssertFalse(policy.step(id: "a", above: true, now: at(sustained + 1)), "cooldown is active")
+        policy.reset()
+        XCTAssertFalse(policy.step(id: "a", above: true, now: at(sustained + 1)), "sustained clock starts over")
+        XCTAssertTrue(policy.step(id: "a", above: true, now: at(sustained + 1 + sustained)))
+    }
+
+    func testResetLetsAPartwayThroughRowRestartFromZero() {
+        var policy = makePolicy()
+        _ = policy.step(id: "a", above: true, now: at(0))
+        _ = policy.step(id: "a", above: true, now: at(sustained - 60))
+        // Without reset the next step at sustained + 1 would fire, because
+        // the sustained clock has been running since t=0.
+        XCTAssertTrue(policy.step(id: "a", above: true, now: at(sustained + 1)))
+        // Reset and try again from the same wall-clock instant.
+        policy.reset()
+        XCTAssertFalse(policy.step(id: "a", above: true, now: at(sustained + 1)), "sustained clock started over")
+    }
+
     // MARK: - Copy
 
     @MainActor
