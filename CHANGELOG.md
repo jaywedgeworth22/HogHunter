@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.3.0 — Tue, Sep 22, 2026
+
+Storage pane:
+
+- New top-level Storage window reachable from the gear menu and the Settings About row, showing the top 25 installed apps by disk usage with a hidden-cost-versus-bundle split.  Rows are flagged red when `hidden` is more than 5× the bundle size and above 200 MB — the case HogHunter's pane exists to surface (a 200 MB `Chrome.app` that actually owns 5 GB once you add its caches, containers, saved state, logs, cookies, HTTP storage, application scripts, group containers, WebKit/Chromium data, and Application Support).
+- Per-app category breakdown when a row is expanded, so the user can see exactly where the bytes live: bundle / sandbox containers / group containers / Application Support / caches / WebKit / preferences plist / saved state / logs / cookies / HTTP storage / application scripts.
+- Two filter modes (All installed / Running now) and three sort orders (Total / Hidden / Bundle).  Manual Refresh button and a 5-minute auto-rescan while the window is open.
+- Per-directory walk capped at 50,000 entries and 3 seconds per target so a runaway `node_modules` or `DerivedData` does not stall the scan; capped rows are flagged "approximate" in the UI.
+- 12 new tests pin the path-attribution rules and the per-directory walk.
+
+Network pane:
+
+- New top-level Network window reachable from the gear menu and Settings, showing the apps with the most open connections and most distinct remote hosts.  Snapshot is `lsof -nP -i -F nPTi`, parsed into per-pid buckets; manual Refresh button and a 10-second auto-rescan while the window is open.
+- Three sort orders (Established / Remote hosts / Open sockets).  If lsof is missing the user sees "lsof binary missing"; if it errors with `operation not permitted`, the pane surfaces "Grant Full Disk Access to HogHunter" rather than failing silently.
+- 9 new tests pin the lsof parser: empty input, single-pid established TCP, multiple-pid sort order, LISTEN sockets with no remote host, IPv6 endpoints split on the closing bracket (not the first colon), top-host cap at 5, fake `ProcessRunner` pass-through for permission-denied and binary-missing cases.
+
+Other:
+
+- `MetadataResolver.lookup(pid:)` and `MetadataResolver.runningBundleIds()` added so the new panes can pull bundle id + display name without a second NSWorkspace hit.
+- `HogStore.runningBundleIdsSnapshot()` and `HogStore.lookup(pid:)` expose the resolver to the panes through the environment object.
+- Bumped to `1.3.0` / build 5.
+
 ## 1.2.0 — Sun, Sep 20, 2026
 
 Performance:

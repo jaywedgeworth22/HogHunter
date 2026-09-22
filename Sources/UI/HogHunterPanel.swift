@@ -3,6 +3,7 @@ import SwiftUI
 
 struct HogHunterPanel: View {
     @EnvironmentObject private var store: HogStore
+    @Environment(\.openWindow) private var openWindow
     @State private var pendingQuit: HogRow?
 
     var body: some View {
@@ -89,6 +90,9 @@ struct HogHunterPanel: View {
             SettingsLink {
                 Text("Settings…")
             }
+            Button("Storage…") { openWindow(id: "hoghunter.storage") }
+            Button("Network…") { openWindow(id: "hoghunter.network") }
+            Divider()
             Button("Activity Monitor") { HogActions.openActivityMonitor() }
             Divider()
             Button("Quit Hog Hunter") { NSApp.terminate(nil) }
@@ -99,8 +103,8 @@ struct HogHunterPanel: View {
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .fixedSize()
-        .help("Settings and Other Actions")
-        .accessibilityLabel("Settings and Other Actions")
+        .help("Settings, Storage, Network, Other Actions")
+        .accessibilityLabel("Settings, Storage, Network, Other Actions")
     }
 
     // MARK: - Meters

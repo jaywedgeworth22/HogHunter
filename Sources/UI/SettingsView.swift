@@ -6,6 +6,7 @@ import SwiftUI
 /// without either side owning the other.
 struct SettingsView: View {
     @EnvironmentObject private var store: HogStore
+    @Environment(\.openWindow) private var openWindow
 
     @AppStorage(HogStore.Key.refreshInterval) private var refreshInterval: Double = 3
     @AppStorage(HogStore.Key.menuBarLabelMode) private var menuBarLabelMode = MenuBarLabelMode.machinePercent.rawValue
@@ -127,6 +128,10 @@ struct SettingsView: View {
             }
             Button("Open Activity Monitor") { HogActions.openActivityMonitor() }
                 .buttonStyle(.link)
+                Button("Storage Window…") { openWindow(id: "hoghunter.storage") }
+                    .buttonStyle(.link)
+                Button("Network Window…") { openWindow(id: "hoghunter.network") }
+                    .buttonStyle(.link)
         }
     }
 
