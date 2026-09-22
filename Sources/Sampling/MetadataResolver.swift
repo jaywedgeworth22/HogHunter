@@ -101,6 +101,22 @@ final class MetadataResolver {
         runningApps[pid]?.bundleId
     }
 
+    /// Reads both bundle id and the localized display name for a running pid.
+    /// Returns `"pid <n>"` as the name when the process is not in the cached
+    /// table (system daemons, jail helpers, briefly-launching children).
+    func lookup(_ pid: pid_t) -> (bundleId: String?, name: String) {
+        if let app = runningApps[pid] {
+            return (bundleId: app.bundleId, name: app.localizedName ?? "pid \(pid)")
+        }
+        return (bundleId: nil, name: "pid \(pid)")
+    }
+
+    /// Snapshot of every pid currently in the running-apps table.  Used by the
+    /// Storage pane to flag rows as "running now" cheaply.
+    func runningBundleIds() -> [String] {
+        runningApps.values.compactMap(\.bundleId)
+    }
+
     /// Resolves only the keys asked for.  Anything already cached is returned
     /// without touching AppKit again -- unless that entry is `isProvisional`,
     /// in which case the cache is bypassed and the key is re-read until the

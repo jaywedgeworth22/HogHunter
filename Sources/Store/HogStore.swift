@@ -34,6 +34,22 @@ final class HogStore: ObservableObject {
     /// toggle it actually belongs to.
     @Published private(set) var loginItemError: String?
 
+    // MARK: - Storage / Network lookups
+
+    /// Snapshot of every currently-running bundle id the resolver knows
+    /// about.  Used by the Storage pane to mark rows as "running now"
+    /// without re-querying NSWorkspace.
+    func runningBundleIdsSnapshot() -> Set<String> {
+        Set(resolver.runningBundleIds())
+    }
+
+    /// Best-effort bundle-id + display-name lookup for the Network pane's
+    /// per-pid attribution.  Falls back to a pid-only label when the pid
+    /// is not in the resolver table.
+    func lookup(pid: pid_t) -> (bundleId: String?, name: String) {
+        resolver.lookup(pid)
+    }
+
     /// Set by the panel.  Metadata resolution beyond the menu bar's top hog and
     /// all history aggregation are gated on this.
     @Published var panelVisible = false {

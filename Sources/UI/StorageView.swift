@@ -1,0 +1,205 @@
+import SwiftUI
+import AppKit
+
+/// Storage pane.  Shows top apps by disk usage with the bundle-vs-hidden
+/// split and, when a row is expanded, the per-category breakdown.
+///
+/// The view holds its own `StorageStore` so the panel does not pollute the
+/// shared `HogStore`, and so opening it has no incidental effect on the CPU
+/// panel's cadence.
+struct StorageView: View {
+    @StateObject private var store: StorageStore
+    @State private var sortOrder: StorageSort = .total
+    @State private var filter: StorageFilter = .all
+    @State private var expandedUsageId: String?
+
+    init(runningBundleIds: @escaping () -> Set<String>) {
+        _store = StateObject(wrappedValue: StorageStore(runningBundleIds: runningBundleIds))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            header
+                .padding(.top, 4)
+            statusRow
+            list
+            footer
+        }
+        .padding(16)
+        .frame(width: 520, height: 640)
+        .background(Color(nsColor: .windowBackgroundColor))
+        .onAppear {
+            if case .idle = store.state { store.refresh() }
+            startRefreshTimer()
+        }
+        .onDisappear { refreshTask?.cancel() }
+        .navigationTitle("Storage")
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Hog Hunter Storage — top apps by disk usage")
+    }
+
+    // MARK: - Header
+
+    private var header: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "internaldrive")
+                .font(.system(size: 22))
+                .foregroundStyle(.tint)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Storage")
+                    .font(.system(size: 18, weight: .semibold))
+                Text(subtitle)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Picker("Filter", selection: $filter) {
+                Text("All installed").tag(StorageFilter.all)
+                Text("Running now").tag(StorageFilter.running)
+            }
+            .pickerStyle(.segmented)
+            .frame(width: 220)
+            Picker("Sort", selection: $sortOrder) {
+                Text("Total").tag(StorageSort.total)
+                Text("Hidden").tag(StorageSort.hidden)
+                Text("Bundle").tag(StorageSort.bundle)
+            }
+            .pickerStyle(.menu)
+            .frame(width: 100)
+        }
+    }
+
+    private var subtitle: String {
+        guard let when = store.state.completedAt else { return "Loading…" }
+        return "Scanned \(Self.relativeTimeFormatter.localizedString(for: when, relativeTo: Date()))."
+    }
+
+    private static let relativeTimeFormatter: RelativeDateTimeFormatter = {
+        let f = RelativeDateTimeFormatter()
+        f.unitsStyle = .abbreviated
+        return f
+    }()
+
+    // MARK: - Status row
+
+    @ViewBuilder
+    private var statusRow: some View {
+        switch store.state {
+        case .idle, .scanning:
+            HStack(spacing: 6) {
+                ProgressView().scaleEffect(0.6)
+                Text("Scanning installed apps…")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("Refresh") { store.refresh() }
+                    .disabled(true)
+            }
+        case .completed:
+            HStack(spacing: 6) {
+                Text("Showing \(store.apps.count) of \(store.installedAppCount) installed apps.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("Refresh") { store.refresh() }
+            }
+        case .failed(let message):
+            HStack(spacing: 6) {
+                Image(systemName: "exclamationmark.triangle")
+                    .foregroundStyle(.orange)
+                Text(message)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("Try again") { store.refresh() }
+            }
+        }
+    }
+
+    // MARK: - List
+
+    private var filteredApps: [StorageUsage] {
+        let base = filter == .running ? store.apps.filter(\.isRunning) : store.apps
+        switch sortOrder {
+        case .total: return base.sorted { $0.totalBytes > $1.totalBytes }
+        case .hidden: return base.sorted { $0.hiddenBytes > $1.hiddenBytes }
+        case .bundle: return base.sorted { $0.bundleBytes > $1.bundleBytes }
+        }
+    }
+
+    private var list: some View {
+        Group {
+            if store.apps.isEmpty, case .completed = store.state {
+                Text("No installed apps found.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if store.apps.isEmpty {
+                Text("Scanning…")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 4) {
+                        ForEach(filteredApps) { app in
+                            StorageRowView(
+                                usage: app,
+                                isExpanded: expandedUsageId == app.id,
+                                onToggle: {
+                                    expandedUsageId = (expandedUsageId == app.id) ? nil : app.id
+                                }
+                            )
+                        }
+                    }
+                    .padding(.vertical, 2)
+                }
+            }
+        }
+    }
+
+    // MARK: - Footer
+
+    private var footer: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            if let caption = store.hiddenShareCaption() {
+                Text(caption)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Text("Click a row to see the breakdown.")
+                .font(.system(size: 10.5))
+                .foregroundStyle(.tertiary)
+        }
+    }
+
+    // MARK: - Refresh timer
+
+    /// Re-scans every 5 minutes while the window is open.  Storage doesn't
+    /// change minute-to-minute; the value of the panel is in the per-app
+    /// picture, not the per-second.
+    @State private var refreshTask: Task<Void, Never>?
+
+    private func startRefreshTimer() {
+        refreshTask?.cancel()
+        let store = self.store
+        refreshTask = Task { @MainActor in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 5 * 60 * 1_000_000_000)
+                if Task.isCancelled { return }
+                store.refresh()
+            }
+        }
+    }
+}
+
+enum StorageSort: Hashable { case total, hidden, bundle }
+enum StorageFilter: Hashable { case all, running }
+
+private extension StorageStore.State {
+    var completedAt: Date? {
+        if case .completed(let at) = self { return at }
+        return nil
+    }
+}

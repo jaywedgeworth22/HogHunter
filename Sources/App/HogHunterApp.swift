@@ -3,6 +3,7 @@ import SwiftUI
 @main
 struct HogHunterApp: App {
     @StateObject private var store = HogStore()
+    @Environment(\.openWindow) private var openWindow
 
     var body: some Scene {
         MenuBarExtra {
@@ -25,5 +26,15 @@ struct HogHunterApp: App {
             SettingsView()
                 .environmentObject(store)
         }
+
+        Window("Storage", id: "hoghunter.storage") {
+            StorageView { store.runningBundleIdsSnapshot() }
+        }
+        .defaultSize(width: 540, height: 660)
+
+        Window("Network", id: "hoghunter.network") {
+            NetworkView { pid in store.lookup(pid: pid) }
+        }
+        .defaultSize(width: 540, height: 560)
     }
 }
