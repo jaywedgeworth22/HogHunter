@@ -1,5 +1,17 @@
 # Hog Hunter — agent notes
 
+> **2026-09-22 — bundle ID migration.**  `com.jayservices.HogHunter` was renamed to
+> `com.simplewithus.hoghunter.macos` and a new App Group
+> `group.com.simplewithus.hoghunter` + Associated Domain `simplewithus.com`
+> were added.  See `docs/rollouts/2026-09-22-bundle-id-migration.md` for the
+> full migration context (Previous → New table, cross-repo files touched,
+> owner action items).  Internal namespaces (`~/Library/Logs/HogHunter/`,
+> Application Support `HogHunter/`, the `"HogHunter"` display name used
+> by `osascript` and `pgrep`) are intentionally NOT renamed — they are
+> not bundle IDs and renaming them would orphan user history and break
+> the running-app quit path.  Future seats: treat `## Bundle identifiers`
+> below as canonical.
+
 Mac menu bar utility.  Finds CPU and memory hogs now, over the past hour, and over the past 24 hours.  Quit from the list after confirm.
 
 **Local:** `~/apps/HogHunter`  
@@ -24,3 +36,40 @@ No LaunchAgent.  The running menu bar app is the sampler.  History only covers t
 ## Copy
 
 Light default.  Title Case chrome.  Body sentence case with two ASCII spaces.
+
+## Bundle identifiers
+
+| Surface | Bundle ID | Source |
+|---|---|---|
+| macOS app (`HogHunter`) | `com.simplewithus.hoghunter.macos` | `project.yml` `targets.HogHunter.settings.base.PRODUCT_BUNDLE_IDENTIFIER` |
+| macOS unit tests (`HogHunterTests`) | `com.simplewithus.hoghunter.macos.tests` | `project.yml` `targets.HogHunterTests.settings.base.PRODUCT_BUNDLE_IDENTIFIER` |
+
+| Capability | Value |
+|---|---|
+| App Group | `group.com.simplewithus.hoghunter` (`com.apple.security.application-groups` in `HogHunter.entitlements`) |
+| Associated Domain | `simplewithus.com` (`com.apple.developer.associated-domains` in `HogHunter.entitlements` — `applinks` + `webcredentials`) |
+
+`XcodeGen` is the project source of truth (`project.yml`); the generated
+`HogHunter.xcodeproj/` is git-ignored.  Always regenerate after editing
+`project.yml`: `xcodegen generate`.
+
+`Info.plist` is auto-generated (`GENERATE_INFOPLIST_FILE: YES`); there is no
+checked-in `Info.plist` file, so the bundle ID flows from the build variable.
+
+Full migration context: `docs/rollouts/2026-09-22-bundle-id-migration.md`.
+Pre-rename IDs (`com.jayservices.HogHunter`, `com.jayservices.HogHunterTests`)
+are intentionally absent from this table; archaeology is preserved in the
+rollout doc and `docs/EFFORT-LOG.md`.
+
+## Internal namespaces (NOT bundle IDs — do not rename)
+
+These are user-visible paths and process names; renaming them would
+orphan existing user state or break the running-app quit path on every
+installed copy.  They are kept stable across the bundle-ID migration.
+
+- `Sources/History/HistoryStore.swift:83` — `Library/Application Support/HogHunter/`
+  (history SQLite + samples directory).
+- `Sources/Store/ProcessControl.swift:22` — `"HogHunter"` display name used
+  for `osascript -e 'tell application "HogHunter" to quit'` and `pgrep -x HogHunter`.
+- `Sources/UI/RowView.swift:156` — `~/Library/Logs/HogHunter/` (Sample-for-3-Seconds
+  report target).

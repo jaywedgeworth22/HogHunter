@@ -1,7 +1,11 @@
 name: HogHunter
 
+# 2026-09-22 — bundle ID migration: com.jayservices.HogHunter → com.simplewithus.hoghunter.macos
+#   bundleIdPrefix moved to the new owned-domain base.  The two PRODUCT_BUNDLE_IDENTIFIER
+#   values below are explicit and override the prefix-derived defaults.  See
+#   docs/rollouts/2026-09-22-bundle-id-migration.md for the full migration context.
 options:
-  bundleIdPrefix: com.jayservices
+  bundleIdPrefix: com.simplewithus.hoghunter
   deploymentTarget:
     macOS: "14.0"
   xcodeVersion: "16.0"
@@ -30,7 +34,7 @@ targets:
       - sdk: libsqlite3.tbd
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.jayservices.HogHunter
+        PRODUCT_BUNDLE_IDENTIFIER: com.simplewithus.hoghunter.macos
         PRODUCT_NAME: HogHunter
         INFOPLIST_KEY_CFBundleDisplayName: "Hog Hunter"
         INFOPLIST_KEY_LSApplicationCategoryType: "public.app-category.utilities"
@@ -55,7 +59,7 @@ targets:
     settings:
       base:
         GENERATE_INFOPLIST_FILE: YES
-        PRODUCT_BUNDLE_IDENTIFIER: com.jayservices.HogHunterTests
+        PRODUCT_BUNDLE_IDENTIFIER: com.simplewithus.hoghunter.macos.tests
 
 schemes:
   HogHunter:
