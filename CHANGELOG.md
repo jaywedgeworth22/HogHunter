@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.4.0 — Sat, Sep 26, 2026
+
+iPhone:
+
+- New Hog Hunter iPhone app.  It finds the Mac on the same Wi-Fi and shows the same Now, Past Hour, or Past 24 Hours list the menu bar app is showing.  It is read only.  Quit stays on the Mac.
+- On the Mac, Settings has Share With iPhone.  It is off until you turn it on.  The pairing code is shown there.  New Code replaces it.  The code is not advertised on the network.
+- The phone asks for Local Network access so it can see the Mac.  Allow it on both devices if macOS or iOS asks.
+
+Icon:
+
+- The Finder, About, and notification icon is the Hog Hunter lockup.  macOS still applies its own rounded mask.  The menu bar glyph is still the flame plus the live CPU number.
+- The iPhone app uses the same lockup.
+
 ## 1.3.0 — Tue, Sep 22, 2026
 
 Storage pane:

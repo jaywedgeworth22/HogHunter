@@ -1,0 +1,84 @@
+import Foundation
+import Network
+
+/// One HTTP GET over the Bonjour endpoint the browser already resolved.
+enum CompanionConnection {
+    static func fetch(endpoint: NWEndpoint, token: String) async throws -> CompanionSnapshot {
+        let connection = NWConnection(to: endpoint, using: .tcp)
+        let reader = ResponseReader()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                reader.continuation = continuation
+                connection.stateUpdateHandler = { state in
+                    switch state {
+                    case .ready:
+                        let request = CompanionHTTP.request(token: token)
+                        connection.send(content: request, completion: .contentProcessed { error in
+                            if let error { reader.fail(error) }
+                        })
+                    case .failed(let error):
+                        reader.fail(error)
+                    default:
+                        break
+                    }
+                }
+                receive(connection, reader: reader, buffer: Data())
+                connection.start(queue: .global(qos: .utility))
+            }
+        } onCancel: {
+            connection.cancel()
+            reader.fail(CancellationError())
+        }
+    }
+
+    private static func receive(_ connection: NWConnection, reader: ResponseReader, buffer: Data) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { data, _, isComplete, error in
+            var buffer = buffer
+            if let data { buffer.append(data) }
+            if let parsed = CompanionHTTP.parseResponse(buffer) {
+                switch parsed.status {
+                case 200:
+                    if let snapshot = try? CompanionJSON.decode(parsed.body) {
+                        reader.succeed(snapshot)
+                    } else {
+                        reader.fail(CompanionClientError.badResponse)
+                    }
+                case 401:
+                    reader.fail(CompanionClientError.unauthorized)
+                default:
+                    reader.fail(CompanionClientError.badResponse)
+                }
+                connection.cancel()
+                return
+            }
+            if isComplete || error != nil {
+                reader.fail(error ?? CompanionClientError.badResponse)
+                connection.cancel()
+                return
+            }
+            receive(connection, reader: reader, buffer: buffer)
+        }
+    }
+}
+
+/// Resumes the fetch continuation once.  A cancel and a late packet can both arrive.
+private final class ResponseReader: @unchecked Sendable {
+    var continuation: CheckedContinuation<CompanionSnapshot, Error>?
+    private let lock = NSLock()
+
+    func succeed(_ snapshot: CompanionSnapshot) {
+        resume(.success(snapshot))
+    }
+
+    func fail(_ error: Error) {
+        resume(.failure(error))
+    }
+
+    private func resume(_ result: Result<CompanionSnapshot, Error>) {
+        lock.lock()
+        let continuation = self.continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume(with: result)
+    }
+}

@@ -1,13 +1,17 @@
 name: HogHunter
 
 # 2026-09-22 — bundle ID migration: com.jayservices.HogHunter → com.simplewithus.hoghunter.macos
-#   bundleIdPrefix moved to the new owned-domain base.  The two PRODUCT_BUNDLE_IDENTIFIER
+#   bundleIdPrefix moved to the new owned-domain base.  The PRODUCT_BUNDLE_IDENTIFIER
 #   values below are explicit and override the prefix-derived defaults.  See
 #   docs/rollouts/2026-09-22-bundle-id-migration.md for the full migration context.
+#
+# 2026-09-26 — iOS companion.  HogHunterIOS is a separate scheme so the Mac CI
+#   test destination stays platform=macOS.  See docs/rollouts/2026-09-26-ios-companion.md.
 options:
   bundleIdPrefix: com.simplewithus.hoghunter
   deploymentTarget:
     macOS: "14.0"
+    iOS: "17.0"
   xcodeVersion: "16.0"
   createIntermediateGroups: true
 
@@ -15,11 +19,10 @@ settings:
   base:
     SWIFT_VERSION: "5.9"
     SWIFT_TREAT_WARNINGS_AS_ERRORS: NO
-    MARKETING_VERSION: "1.3.0"
-    CURRENT_PROJECT_VERSION: "5"
+    MARKETING_VERSION: "1.4.0"
+    CURRENT_PROJECT_VERSION: "6"
     CODE_SIGN_STYLE: Automatic
     GENERATE_INFOPLIST_FILE: YES
-    MACOSX_DEPLOYMENT_TARGET: "14.0"
 
 targets:
   HogHunter:
@@ -36,6 +39,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.simplewithus.hoghunter.macos
         PRODUCT_NAME: HogHunter
+        MACOSX_DEPLOYMENT_TARGET: "14.0"
         INFOPLIST_KEY_CFBundleDisplayName: "Hog Hunter"
         INFOPLIST_KEY_LSApplicationCategoryType: "public.app-category.utilities"
         INFOPLIST_KEY_LSUIElement: YES
@@ -43,6 +47,7 @@ targets:
         INFOPLIST_KEY_CFBundleIconName: AppIcon
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         COMBINE_HIDPI_IMAGES: YES
+        INFOPLIST_FILE: macos/Info.plist
       configs:
         Release:
           ENABLE_HARDENED_RUNTIME: YES
@@ -60,6 +65,31 @@ targets:
       base:
         GENERATE_INFOPLIST_FILE: YES
         PRODUCT_BUNDLE_IDENTIFIER: com.simplewithus.hoghunter.macos.tests
+        MACOSX_DEPLOYMENT_TARGET: "14.0"
+
+  HogHunterIOS:
+    type: application
+    platform: iOS
+    sources:
+      - path: ios/Sources
+      - path: Sources/Companion/CompanionSnapshot.swift
+      - path: Sources/Companion/CompanionHTTP.swift
+      - path: ios/Assets.xcassets
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.simplewithus.hoghunter.ios
+        PRODUCT_NAME: HogHunter
+        IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+        TARGETED_DEVICE_FAMILY: "1"
+        MARKETING_VERSION: "1.0.0"
+        CURRENT_PROJECT_VERSION: "1"
+        INFOPLIST_KEY_CFBundleDisplayName: "Hog Hunter"
+        INFOPLIST_KEY_LSApplicationCategoryType: "public.app-category.utilities"
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        SWIFT_EMIT_LOC_STRINGS: YES
+        ENABLE_PREVIEWS: NO
+        INFOPLIST_FILE: ios/Info.plist
 
 schemes:
   HogHunter:
@@ -70,3 +100,7 @@ schemes:
     test:
       targets:
         - HogHunterTests
+  HogHunterIOS:
+    build:
+      targets:
+        HogHunterIOS: all

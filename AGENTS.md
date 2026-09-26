@@ -29,7 +29,9 @@ ditto build/Build/Products/Release/HogHunter.app /Applications/HogHunter.app
 
 Prefer `scripts/install.sh` over the manual steps above — it builds Release, signs with the "Developer ID Application" identity when it is in the keychain (adhoc otherwise), quits the running copy, installs, and relaunches.  It installs to `/Applications` by default when a copy is already there, otherwise to `~/Applications`; pass `--dest PATH` to choose explicitly.  Use `--dry-run` to check what it would do without touching the running app or the destination, or `--no-launch` to skip the relaunch.
 
-`HogHunterTests` (XCTest, `Tests/HogHunterTests/`) covers pure logic such as `HogFormat`.  Run with `xcodebuild -scheme HogHunter -destination 'platform=macOS' test`.  CI (`.github/workflows/ci.yml`) runs the same on every push to `main` and every pull request.
+`HogHunterTests` (XCTest, `Tests/HogHunterTests/`) covers pure logic such as `HogFormat` and the iPhone snapshot codec.  Run with `xcodebuild -scheme HogHunter -destination 'platform=macOS' test`.  CI (`.github/workflows/ci.yml`) runs the same on every push to `main` and every pull request, then builds the `HogHunterIOS` scheme for the iOS Simulator.
+
+The iPhone app is `ios/Sources`, scheme `HogHunterIOS`.  It is a read-only viewer of the Mac snapshot over Bonjour (`_hoghunter._tcp`).  Share With iPhone is off until the owner turns it on in Mac Settings.  The pairing code is not advertised.  There is no quit route.  Do not TestFlight it unless the owner asks.  Rollout: `docs/rollouts/2026-09-26-ios-companion.md`.
 
 No LaunchAgent.  The running menu bar app is the sampler.  History only covers time it has been open.
 
@@ -43,6 +45,7 @@ Light default.  Title Case chrome.  Body sentence case with two ASCII spaces.
 |---|---|---|
 | macOS app (`HogHunter`) | `com.simplewithus.hoghunter.macos` | `project.yml` `targets.HogHunter.settings.base.PRODUCT_BUNDLE_IDENTIFIER` |
 | macOS unit tests (`HogHunterTests`) | `com.simplewithus.hoghunter.macos.tests` | `project.yml` `targets.HogHunterTests.settings.base.PRODUCT_BUNDLE_IDENTIFIER` |
+| iOS companion (`HogHunterIOS`) | `com.simplewithus.hoghunter.ios` | `project.yml` `targets.HogHunterIOS.settings.base.PRODUCT_BUNDLE_IDENTIFIER` |
 
 | Capability | Value |
 |---|---|

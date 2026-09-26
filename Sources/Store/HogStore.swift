@@ -83,6 +83,15 @@ final class HogStore: ObservableObject {
     @Published var alertThresholdPercent: Double = 300 { didSet { persist() } }
     @Published var alertSustainedMinutes: Int = 5 { didSet { persist() } }
     @Published var appearance: AppearanceChoice = .light { didSet { persist() } }
+    /// Off until the owner turns it on.  The iPhone can read the list.  It cannot quit.
+    @Published var shareWithIPhone = false {
+        didSet {
+            persist()
+            if !loadingSettings { syncCompanion() }
+        }
+    }
+    @Published private(set) var companionCode = ""
+    @Published private(set) var companionStatus = "Off"
 
     /// Sustained-hog notifications.  Settings observes it directly for the
     /// authorization answer.
@@ -100,7 +109,13 @@ final class HogStore: ObservableObject {
         static let alertThresholdPercent = "alertThresholdPercent"
         static let alertSustainedMinutes = "alertSustainedMinutes"
         static let appearance = "appearance"
+        static let shareWithIPhone = "shareWithIPhone"
+        static let companionCode = "companionCode"
+        static let companionPeerID = "companionPeerID"
     }
+
+    private let companionServer = CompanionServer()
+    private var companionPeerID = ""
 
     // MARK: - Machinery
 
@@ -149,6 +164,7 @@ final class HogStore: ObservableObject {
     deinit {
         timer?.invalidate()
         pressureSource?.cancel()
+        companionServer.stop()
     }
 
     // MARK: - Lifecycle
@@ -168,6 +184,7 @@ final class HogStore: ObservableObject {
         tick()
         restartTimer()
         watchMemoryPressure()
+        syncCompanion()
     }
 
     func stop() {
@@ -289,6 +306,7 @@ final class HogStore: ObservableObject {
             resolver.prune(live: Set(samples.keys))
         }
         if window != .now { refreshHistory() }
+        publishCompanion()
     }
 
     private func record(_ processes: [ProcessSample], groupKeys: [ProcessKey: String], coreCount: Int) {
@@ -522,8 +540,10 @@ final class HogStore: ObservableObject {
             // back looking at live rows.
             historyError = nil
             rows = liveRows
+            publishCompanion()
         } else {
             rows = historyRows
+            publishCompanion()
             refreshHistory()
         }
     }
@@ -570,6 +590,7 @@ final class HogStore: ObservableObject {
             )
         }
         if window != .now { rows = historyRows }
+        publishCompanion()
     }
 
     private func historyDetail(_ item: HistoryStore.Aggregate) -> String {
@@ -800,6 +821,19 @@ final class HogStore: ObservableObject {
         if threshold >= 100 { alertThresholdPercent = threshold }
         let sustained = defaults.integer(forKey: Key.alertSustainedMinutes)
         if sustained >= 1 { alertSustainedMinutes = sustained }
+        shareWithIPhone = defaults.object(forKey: Key.shareWithIPhone) as? Bool ?? false
+        if let code = defaults.string(forKey: Key.companionCode), !code.isEmpty {
+            companionCode = code
+        } else {
+            companionCode = CompanionToken.make()
+            defaults.set(companionCode, forKey: Key.companionCode)
+        }
+        if let peer = defaults.string(forKey: Key.companionPeerID), !peer.isEmpty {
+            companionPeerID = peer
+        } else {
+            companionPeerID = UUID().uuidString
+            defaults.set(companionPeerID, forKey: Key.companionPeerID)
+        }
     }
 
     private func persist() {
@@ -814,6 +848,7 @@ final class HogStore: ObservableObject {
         defaults.set(alertThresholdPercent, forKey: Key.alertThresholdPercent)
         defaults.set(alertSustainedMinutes, forKey: Key.alertSustainedMinutes)
         defaults.set(appearance.rawValue, forKey: Key.appearance)
+        defaults.set(shareWithIPhone, forKey: Key.shareWithIPhone)
     }
 
     /// Asks for notification permission the moment alerts are switched on, and
@@ -872,7 +907,57 @@ final class HogStore: ObservableObject {
             if sustained >= 1, sustained != self.alertSustainedMinutes {
                 self.alertSustainedMinutes = sustained
             }
+            let sharing = self.defaults.object(forKey: Key.shareWithIPhone) as? Bool ?? false
+            if sharing != self.shareWithIPhone {
+                self.shareWithIPhone = sharing
+            }
         }
+    }
+
+    // MARK: - iPhone companion
+
+    func regenerateCompanionCode() {
+        companionCode = CompanionToken.make()
+        defaults.set(companionCode, forKey: Key.companionCode)
+        companionServer.updateToken(companionCode)
+    }
+
+    private var companionDisplayName: String {
+        let name = Host.current().localizedName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let name, !name.isEmpty { return name }
+        return "This Mac"
+    }
+
+    private func syncCompanion() {
+        guard shareWithIPhone else {
+            companionServer.stop()
+            companionStatus = "Off"
+            return
+        }
+        companionStatus = "Starting"
+        let name = companionDisplayName
+        companionServer.start(name: name, peerID: companionPeerID, token: companionCode) { [weak self] status in
+            Task { @MainActor in
+                self?.companionStatus = status
+            }
+        }
+        publishCompanion()
+    }
+
+    private func publishCompanion() {
+        guard shareWithIPhone else { return }
+        let sampledAt = pulse.sampledAt == .distantPast ? Date() : pulse.sampledAt
+        let snapshot = CompanionSnapshotBuilder.make(
+            hostName: companionDisplayName,
+            sampledAt: sampledAt,
+            hasBaseline: hasBaseline,
+            window: window,
+            grouping: grouping,
+            scale: cpuScale,
+            pulse: pulse,
+            rows: rows
+        )
+        companionServer.update(snapshot: snapshot)
     }
 
     // MARK: - Staleness
