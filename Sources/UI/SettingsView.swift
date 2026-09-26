@@ -27,6 +27,7 @@ struct SettingsView: View {
                 sustainedMinutes: $alertSustainedMinutes
             )
             loginSection
+            iphoneSection
             about
         }
         .formStyle(.grouped)
@@ -106,6 +107,43 @@ struct SettingsView: View {
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
         }
+    }
+
+    // MARK: - iPhone
+
+    private var iphoneSection: some View {
+        Section("iPhone") {
+            Toggle("Share With iPhone", isOn: $store.shareWithIPhone)
+            Text("The Hog Hunter iPhone app can see this list while both are on the same Wi-Fi.  It cannot quit anything.  Turn this off on a network you do not trust.")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if store.shareWithIPhone {
+                LabeledContent("Pairing Code") {
+                    Text(spacedCode(store.companionCode))
+                        .font(.system(.title3, design: .monospaced))
+                        .textSelection(.enabled)
+                }
+                Text(store.companionStatus)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                HStack {
+                    Button("Copy Code") { copyCompanionCode() }
+                    Button("New Code") { store.regenerateCompanionCode() }
+                }
+            }
+        }
+    }
+
+    private func spacedCode(_ code: String) -> String {
+        guard code.count > 4 else { return code }
+        let split = code.index(code.startIndex, offsetBy: 4)
+        return "\(code[..<split]) \(code[split...])"
+    }
+
+    private func copyCompanionCode() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(store.companionCode, forType: .string)
     }
 
     // MARK: - About

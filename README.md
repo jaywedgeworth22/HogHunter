@@ -15,6 +15,14 @@ Local only.  Not on the App Store.  Not TestFlight.
 
 History only covers time the menu bar app has been running.  Turn on **Launch at Login** if you want a real day of data.
 
+## iPhone
+
+Hog Hunter on iPhone shows the same list the Mac is showing, over the Wi-Fi you are both on.  It cannot quit anything.
+
+On the Mac, open Settings and turn on **Share With iPhone**.  Type the pairing code into the phone.  Leave the switch off on a network you do not trust.
+
+Build the phone app for the simulator with scheme `HogHunterIOS`.  It is not on the App Store.
+
 ## Build and run
 
 ```bash
@@ -45,4 +53,4 @@ Apache License 2.0.  See [LICENSE](LICENSE) for details.
 
 ## Notes
 
-Light appearance is the default.  Headings and buttons are Title Case.  Body copy is sentence case with two spaces between sentences.
+Light appearance is the default.  Headings and buttons are Title Case.  Body copy is sentence case with two spaces between sentences.  The app icon is the Hog Hunter lockup.  The menu bar glyph stays the flame.

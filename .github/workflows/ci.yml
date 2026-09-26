@@ -33,3 +33,8 @@ jobs:
             xcodebuild -scheme HogHunter -destination 'platform=macOS' -derivedDataPath build test \
               CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" -quiet
           fi
+
+      - name: Build iOS companion
+        run: |
+          xcodebuild -scheme HogHunterIOS -destination 'generic/platform=iOS Simulator' -derivedDataPath build-ios build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" -quiet
